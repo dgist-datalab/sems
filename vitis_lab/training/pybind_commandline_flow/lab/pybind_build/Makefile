@@ -25,7 +25,7 @@ XCLBIN := kernels.$(TARGET).xclbin
 # =========================================================
 # Source directory
 # =========================================================
-ROOT_REPO := /home/user1/Documents/vitis_lab/training
+ROOT_REPO := /home/user1/Documents/alveo/vitis_lab/training
 SRC_REPO := $(ROOT_REPO)/pybind_commandline_flow/lab/src
 
 PROJECT_DIR := $(ROOT_REPO)/pybind_commandline_flow/lab
