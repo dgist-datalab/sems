@@ -1166,7 +1166,7 @@ if __name__ == "__main__":
         lS_i = torch.load('saved_sum/lS_i0.pt', map_location=torch.device('cpu'))
         len_lS_o = torch.numel(lS_o)
         len_lS_i = torch.numel(lS_i)
-        xclbinTargetFilename = "/home/user1/Documents/vitis_lab/training/pybind_commandline_flow/lab/build/" + args.target + "/kernels." + args.target + ".xclbin"
+        xclbinTargetFilename = "/home/user1/Documents/alveo/vitis_lab/training/pybind_commandline_flow/lab/build/" + args.target + "/kernels." + args.target + ".xclbin"
         
         pybind_host2.alveo_init(xclbinTargetFilename, args.arch_sparse_feature_size, args.mini_batch_size, ln_emb.size, len_lS_o, len_lS_i)
     else:

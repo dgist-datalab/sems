@@ -35,7 +35,7 @@ echo "run pytorch ..."
 
 sudo echo 3 > /proc/sys/vm/drop_caches
 
-$dlrm_pt_bin --arch-sparse-feature-size=16 --arch-mlp-bot="13-512-256-64-16" --arch-mlp-top="512-256-1" --data-generation=dataset --data-set=kaggle --raw-data-file=./input/train.txt --processed-data-file=./input/kaggleAdDisplayChallenge_processed.npz --loss-function=bce --round-targets=True --learning-rate=0.1 --mini-batch-size=128 --print-freq=1024 --print-time --test-mini-batch-size=16384  --load-model=./models/model_sum.pt --test-freq=1024 --inference-only --arch-interaction-op=sum --load-embedding=/home/user1/Documents/vitis_lab/training/pybind_commandline_flow/lab/data/embedding_sum.txt --save-time --test-type="alveo_hw_test" $@ 2>&1 | tee run_kaggle_pt.log
+$dlrm_pt_bin --arch-sparse-feature-size=16 --arch-mlp-bot="13-512-256-64-16" --arch-mlp-top="512-256-1" --data-generation=dataset --data-set=kaggle --raw-data-file=./input/train.txt --processed-data-file=./input/kaggleAdDisplayChallenge_processed.npz --loss-function=bce --round-targets=True --learning-rate=0.1 --mini-batch-size=128 --print-freq=1024 --print-time --test-mini-batch-size=16384  --load-model=./models/model_sum.pt --test-freq=1024 --inference-only --arch-interaction-op=sum --load-embedding=/home/user1/Documents/alveo/vitis_lab/training/pybind_commandline_flow/lab/data/embedding_sum.txt --save-time --test-type="alveo_hw_test" $@ 2>&1 | tee run_kaggle_pt.log
 
 
 echo "done"

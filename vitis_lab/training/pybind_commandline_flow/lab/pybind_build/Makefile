@@ -99,7 +99,7 @@ $(BUILD_DIR)/$(EMCONFIG_FILE):
 	 emconfigutil --nd 1  --platform $(PLATFORM) --od $(BUILD_DIR)
 
 
-build: $(BUILD_DIR)/pybind_host2$(shell python3-config --extension-suffix) $(BUILD_DIR)/$(XCLBIN) $(BUILD_DIR)/$(EMCONFIG_FILE); cp $(BUILD_DIR)/pybind_host2$(shell python3-config --extension-suffix) ~/Documents/dlrm; 
+build: $(BUILD_DIR)/pybind_host2$(shell python3-config --extension-suffix) $(BUILD_DIR)/$(XCLBIN) $(BUILD_DIR)/$(EMCONFIG_FILE); cp $(BUILD_DIR)/pybind_host2$(shell python3-config --extension-suffix) ~/Documents/alveo/dlrm; 
 
 run: build 
 ifeq ($(TARGET), hw)

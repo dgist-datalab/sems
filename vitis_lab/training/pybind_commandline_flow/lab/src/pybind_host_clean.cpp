@@ -124,8 +124,8 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	const char* Target_Platform_Vendor   = "Xilinx";
 	const char* Target_Device_Name       = "xilinx_u200_xdma_201830_2";
 	//const char* xclbinFilename           = "/home/user1/Documents/vitis_lab/training/pybind_commandline_flow/lab/build/sw_emu/kernels.sw_emu.xclbin";
-	const char* DataIn_1_FileName        = "/home/user1/Documents/vitis_lab/training/pybind_commandline_flow/lab/data/embedding_sum.txt";
-	cout << "HOST-Info: Platform_Vendor : " << Target_Platform_Vendor << endl;
+	const char* DataIn_1_FileName        = "/home/user1/Documents/alveo/vitis_lab/training/pybind_commandline_flow/lab/data/embedding_sum.txt";
+    cout << "HOST-Info: Platform_Vendor : " << Target_Platform_Vendor << endl;
 	cout << "HOST-Info: Device_Name     : " << Target_Device_Name << endl;
 	cout << "HOST-Info: XCLBIN_file     : " << xclbinFilename << endl;
 	cout << "HOST-Info: DataIn_1_File   : " << DataIn_1_FileName << endl;
