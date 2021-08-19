@@ -463,7 +463,7 @@ void K_VADD(const float *in1,
                     #pragma HLS PIPELINE
                     vector_num = sparse_index_group_batch[j];
                     offset = table_addr + (unsigned int)vector_num * (unsigned int)ARCH_SPARSE_FEATURE_SIZE;
-                    memcpy(v_cache + out_vec_addr, in1 + offset, sizeof(float) * ARCH_SPARSE_FEATURE_SIZE);
+                    memcpy(v_cache + out_vec_addr, in1 + offset, sizeof(float) * ARCH_SPARSE_FEATURE_SIZE);                   
                     //memcpy(v_cache + out_vec_addr, in1 + offset, sizeof(float) * ARCH_SPARSE_FEATURE_SIZE);
                     //memcpy(v_cache + out_vec_addr, in1 + offset, sizeof(float) * ARCH_SPARSE_FEATURE_SIZE);
                 }
@@ -485,7 +485,6 @@ void K_VADD(const float *in1,
                     }
                 }
             }
-
         }
                  
         memcpy(out_r, out_r_l, sizeof(float) * out_r_size);

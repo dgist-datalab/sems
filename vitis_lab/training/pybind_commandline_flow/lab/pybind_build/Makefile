@@ -58,7 +58,7 @@ VPPFLAGS += -I$(KERNEL_SRC_H_DIR)
 VPPFLAGS += --temp_dir $(BUILD_DIR)
 VPPFLAGS += --log_dir $(BUILD_DIR)
 VPPFLAGS += --platform $(PLATFORM)
-VPPFLAGS += --kernel_frequency 244
+#VPPFLAGS += --kernel_frequency 244
 
 
 # =========================================================

@@ -57,17 +57,18 @@ using namespace std;
 
 #define ALL_MESSAGES
 #define NUM_CUS 2
+#define NUM_DEVS 2
 
 const unsigned int DATAIN_1_SIZE = 2160804928;
 
 int g_arch_sparse_feature_size;
 int g_num_sparse_features;
-int g_i_begin[NUM_CUS];
-int g_i_end[NUM_CUS];
-int g_sparse_offset_group_batch_size = -1;
-int g_sparse_index_group_batch_size = -1;
+int g_i_begin[NUM_CUS * NUM_DEVS];
+int g_i_end[NUM_CUS * NUM_DEVS];
+int g_sparse_offset_group_batch_size[NUM_DEVS];
+int g_sparse_index_group_batch_size[NUM_DEVS];
 
-float *RES[2];
+float *RES[NUM_CUS * NUM_DEVS];
 float *DataIn_1;
 
 unsigned int *emb_l;
@@ -75,18 +76,20 @@ unsigned int *emb_l;
 int *lS_o;
 int *lS_i;
 
-cl_mem	GlobMem_BUF_emb_l,
-        GlobMem_BUF_lS_o,
-        GlobMem_BUF_lS_i,
-        GlobMem_BUF_DataIn_1,
-        GlobMem_BUF_RES[NUM_CUS];
+cl_mem	GlobMem_BUF_emb_l[NUM_DEVS],
+        GlobMem_BUF_lS_o[NUM_DEVS],
+        GlobMem_BUF_lS_i[NUM_DEVS],
+        GlobMem_BUF_DataIn_1[NUM_DEVS],
+        GlobMem_BUF_RES[NUM_CUS * NUM_DEVS];
 
-cl_context Context;
-cl_command_queue Command_Queue;
+cl_context Context[NUM_DEVS];
+cl_command_queue Command_Queue[NUM_DEVS];
 
-cl_kernel Kernel[NUM_CUS];
-cl_program Program;
-cl_device_id Target_Device_ID;
+cl_kernel Kernel[NUM_CUS * NUM_DEVS];
+cl_program Program[NUM_DEVS];
+cl_device_id Target_Device_ID[NUM_DEVS];
+bool Device_Detected[NUM_DEVS];
+
 
 // ********************************************************************************** //
 // ---------------------------------------------------------------------------------- //
@@ -161,7 +164,7 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	cl_device_id        *Device_IDs;
 	cl_uint             Nb_Of_Devices;
 	//cl_device_id        Target_Device_ID;
-	bool                Device_Detected;
+	//bool                Device_Detected;
 	char                *device_info;
 
 	//cl_context          Context;
@@ -171,6 +174,7 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	size_t              size;
 
     int                 i;
+	int Nb_Of_Elements;
 
 	// ------------------------------------------------------------------------------------
 	// Step 2.1: Get All PLATFORMS, then search for Target_Platform_Vendor (CL_PLATFORM_VENDOR)
@@ -276,7 +280,9 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 
 	// Search for CL_DEVICE_NAME = Target_Device_Name
 	// ............................................................................
-	Device_Detected = false;
+	for (ui = 0; ui < NUM_DEVS; ui++)
+        Device_Detected[ui] = false;
+    
 	for (ui = 0; ui < Nb_Of_Devices; ui++) {
 		errCode = clGetDeviceInfo(Device_IDs[ui], CL_DEVICE_NAME, 0, NULL, &size);
 		if (errCode != CL_SUCCESS) {
@@ -299,43 +305,50 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 		// Check if the current device matches Target_Device_Name
 		// ............................................................................
 		if (strcmp(device_info, Target_Device_Name) == 0) {
-			Device_Detected        = true;
-			Target_Device_ID       = Device_IDs[ui];
+			Device_Detected[ui]        = true;
+			Target_Device_ID[ui]      = Device_IDs[ui];
 		}
-	}
 
-	if (Device_Detected == false) {
-		cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
-		return EXIT_FAILURE;
-	} else {
-		#ifdef ALL_MESSAGES
-		cout << "HOST-Info: Selected device              : " << Target_Device_Name << endl << endl;
-		#endif
-	}
+        delete[] device_info;
+    }
 
-	// ------------------------------------------------------------------------------------
-	// Step 2.3: Create Context
-	// ------------------------------------------------------------------------------------
-	#ifdef ALL_MESSAGES
-	cout << "HOST-Info: Creating Context ... " << endl;
-	#endif
-	Context = clCreateContext(0, 1, &Target_Device_ID, NULL, NULL, &errCode);
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "HOST-Error: Failed to create a Context" << endl << endl;
-		return EXIT_FAILURE;
-	}
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {
+    
+	    if (Device_Detected[ui] == false) {
+		    cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device: " << ui << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    } else {
+		    #ifdef ALL_MESSAGES
+		    cout << "HOST-Info: Selected device              : " << Target_Device_Name << endl << endl;
+		    #endif
+        }
 
-	// ------------------------------------------------------------------------------------
-	// Step 2.4: Create Command Queue (commands are executed in-order)
-	// ------------------------------------------------------------------------------------
-	#ifdef ALL_MESSAGES
-	cout << "HOST-Info: Creating Command Queue ... " << endl;
-	#endif
-	Command_Queue = clCreateCommandQueue(Context, Target_Device_ID, CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, &errCode);
-	//Command_Queue = clCreateCommandQueue(Context, Target_Device_ID, 0, &errCode);
-    if (errCode != CL_SUCCESS) {
-		cout << endl << "HOST-Error: Failed to create a Command Queue" << endl << endl;
-		return EXIT_FAILURE;
+    	// ------------------------------------------------------------------------------------
+    	// Step 2.3: Create Context
+	    // ------------------------------------------------------------------------------------
+	    #ifdef ALL_MESSAGES
+	    cout << "HOST-Info: Creating Context ... " << endl;
+	    #endif
+	    Context[ui] = clCreateContext(0, 1, &Target_Device_ID[ui], NULL, NULL, &errCode);
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "HOST-Error: Failed to create a Context" << endl << endl;
+		    return EXIT_FAILURE;
+	    }
+
+	    // ------------------------------------------------------------------------------------
+	    // Step 2.4: Create Command Queue (commands are executed in-order)
+	    // ------------------------------------------------------------------------------------
+	    #ifdef ALL_MESSAGES
+	    cout << "HOST-Info: Creating Command Queue ... " << endl;
+	    #endif
+	    Command_Queue[ui] = clCreateCommandQueue(Context[ui], Target_Device_ID[ui], CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, &errCode);
+	    //Command_Queue = clCreateCommandQueue(Context, Target_Device_ID, 0, &errCode);
+        if (errCode != CL_SUCCESS) {
+	    	cout << endl << "HOST-Error: Failed to create a Command Queue" << endl << endl;
+		    return EXIT_FAILURE;
+	    }
 	}
 
 	// ============================================================================
@@ -350,7 +363,6 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	cout << "HOST-Info: (Step 3) Create Program and Kernel                            " << endl;
 	cout << "HOST-Info: ============================================================= " << endl;
 	#endif
-
 	// ------------------------------------------------------------------
 	// Step 3.1: Load Binary File from a disk to Memory
 	// ------------------------------------------------------------------
@@ -379,45 +391,52 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	cout << "HOST-Info: Creating Program with Binary ..." << endl;
 	#endif
 	Program_Length_in_Bytes = program_length;
-	Program = clCreateProgramWithBinary(Context, 1, &Target_Device_ID, &Program_Length_in_Bytes,
+
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {    
+	    if (Device_Detected[ui] == false) {
+		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    } 
+    
+        Program[ui] = clCreateProgramWithBinary(Context[ui], 1, &Target_Device_ID[ui], &Program_Length_in_Bytes,
                                         (const unsigned char **) &xclbin_Memory, &Binary_Status, &errCode);
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "HOST-Error: Failed to create a Program from a Binary" << endl << endl;
-		return EXIT_FAILURE;
-	}
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "HOST-Error: Failed to create a Program from a Binary" << endl << endl;
+		    return EXIT_FAILURE;
+	    }
 
-	// -------------------------------------------------------------
-	// Step 3.3: Build (compiles and links) a program executable from binary
-	// -------------------------------------------------------------
-	#ifdef ALL_MESSAGES
-	cout << "HOST-Info: Building the Program ..." << endl;
-	#endif
+	    // -------------------------------------------------------------
+	    // Step 3.3: Build (compiles and links) a program executable from binary
+	    // -------------------------------------------------------------
+	    #ifdef ALL_MESSAGES
+	    cout << "HOST-Info: Building the Program ..." << endl;
+	    #endif
 
-	errCode = clBuildProgram(Program, 1, &Target_Device_ID, NULL, NULL, NULL);
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "HOST-Error: Failed to build a Program Executable" << endl << endl;
-		return EXIT_FAILURE;
-	}
+	    errCode = clBuildProgram(Program[ui], 1, &Target_Device_ID[ui], NULL, NULL, NULL);
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "HOST-Error: Failed to build a Program Executable" << endl << endl;
+		    return EXIT_FAILURE;
+	    }
 
-	// -------------------------------------------------------------
-	// Step 3.4: Create a Kernel we wish to run
-	// -------------------------------------------------------------
-	#ifdef ALL_MESSAGES
-	cout << "HOST-Info: Creating a Kernel: K_VADD ..." << endl;
-	#endif
+	    // -------------------------------------------------------------
+	    // Step 3.4: Create a Kernel we wish to run
+	    // -------------------------------------------------------------
+	    #ifdef ALL_MESSAGES
+	    cout << "HOST-Info: Creating a Kernel: K_VADD ..." << endl;
+	    #endif
 
-	for (i = 0; i < NUM_CUS; i++)
-    {
-        Kernel[i] = clCreateKernel(Program, "K_VADD", &errCode);
-        if (errCode != CL_SUCCESS)
+	    for (i = 0; i < NUM_CUS; i++)
         {
-            cout << endl << "HOST-Error: Failed to create a kernel" << endl << endl;
-            return EXIT_FAILURE;
+            Kernel[ui * NUM_DEVS + i] = clCreateKernel(Program[ui], "K_VADD", &errCode);
+            if (errCode != CL_SUCCESS)
+            {
+                cout << endl << "HOST-Error: Failed to create a kernel" << endl << endl;
+                return EXIT_FAILURE;
+            }
         }
     }
-
-	int Nb_Of_Elements;
-    int Nb_Of_Elements_Mem;
 
 	#ifdef ALL_MESSAGES
 	cout << endl;
@@ -434,30 +453,12 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 
 	//cout << "HOST-Info: Reading Input data from the " << DataIn_1_FileName << " file ... ";
 
-    void *ptr[NUM_CUS];
+    void *ptr[NUM_DEVS * NUM_CUS];
 
     emb_l = create_emb_l(DataIn_1_FileName, g_num_sparse_features * sizeof(unsigned int), 4, num_sparse_features);
     DataIn_1 = read_emb_file(DataIn_1_FileName, DATAIN_1_SIZE, 108);
 
     Nb_Of_Elements = batch_size * g_arch_sparse_feature_size / NUM_CUS;
-
-    ptr[0] = nullptr;
-	if (posix_memalign(&ptr[0],4096, Nb_Of_Elements * NUM_CUS * sizeof(float))) {
-		cout << endl << "HOST-Error: Out of Memory during memory allocation for RES array" << endl << endl;
-		return EXIT_FAILURE;
-	}
-
-    RES[0] = reinterpret_cast<float *>(ptr[0]);
-    
-    for (i = 1; i < NUM_CUS; i++)
-    {
-        ptr[i] = nullptr;
-    	if (posix_memalign(&ptr[i],4096, Nb_Of_Elements * sizeof(float))) {
-	    	cout << endl << "HOST-Error: Out of Memory during memory allocation for RES array" << endl << endl;
-		    return EXIT_FAILURE;
-	    }
-        RES[i] = reinterpret_cast<float *>(ptr[i]);
-    }
 
     void *ptr_o = nullptr;
     void *ptr_i = nullptr;
@@ -484,102 +485,145 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	cout << "HOST-Info: Allocating buffers in Global Memory to store Input and Output Data ..." << endl;
 	#endif
 
-	// Allocate Global Memory for GlobMem_BUF_DataIn_1
-	// .......................................................
-    
-    GlobMem_BUF_DataIn_1 = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, DATAIN_1_SIZE, DataIn_1, &errCode);
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_DataIn_1" << endl << endl;
-		return EXIT_FAILURE;
-	}
-
-	// Allocate Global Memory for GlobMem_BUF_ptr_emb_l
-	// .......................................................
-	GlobMem_BUF_emb_l = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, g_num_sparse_features * sizeof(unsigned int), emb_l, &errCode);
-	if (errCode != CL_SUCCESS)
-	{
-		cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_emb_l" << endl << endl;
-	}
-
-	// Allocate Global Memory for GlobMem_BUF_RES
-	// .......................................................
-    for (i = 0; i < NUM_CUS; i++)
-    {
-        GlobMem_BUF_RES[i] = clCreateBuffer(Context, CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR, Nb_Of_Elements * sizeof(float), RES[i], &errCode);
-        if (errCode != CL_SUCCESS) {
-		    cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_RES" << endl << endl;
-		    return EXIT_FAILURE;
-        }
-	}
-
-    GlobMem_BUF_lS_o = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_o * sizeof(int), lS_o, &errCode);
-    if (errCode != CL_SUCCESS)
-    {
-        cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_lS_o" << endl << endl;
-        return EXIT_FAILURE;
-    }
-
-    GlobMem_BUF_lS_i = clCreateBuffer(Context, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_i * sizeof(int), lS_i, &errCode);
-    if (errCode != CL_SUCCESS)
-    {
-        cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_lS_i" << endl << endl;
-    }
-
-	// ----------------------------------------
-	// Step 5.1: Set Kernel Arguments
-	// ----------------------------------------
-
-    #ifdef ALL_MESSAGES
-	cout << "HOST-Info: Setting Kernel arguments ..." << endl;
-	#endif
-
-    for (i = 0; i < NUM_CUS; i++)
+	for (ui = 0; ui < NUM_DEVS; ui++)
     {    
-        errCode = clSetKernelArg(Kernel[i], 0, sizeof(cl_mem), &GlobMem_BUF_DataIn_1);
-        errCode |= clSetKernelArg(Kernel[i], 1, sizeof(cl_mem), &GlobMem_BUF_RES[i]);
-        errCode |= clSetKernelArg(Kernel[i], 2, sizeof(cl_mem), &GlobMem_BUF_emb_l);
-   	    errCode |= clSetKernelArg(Kernel[i], 3, sizeof(cl_mem), &GlobMem_BUF_lS_o);
-	    errCode |= clSetKernelArg(Kernel[i], 4, sizeof(cl_mem), &GlobMem_BUF_lS_i);
-	    //errCode |= clSetKernelArg(Kernel[i], 5, sizeof(int), &g_num_sparse_features);
-        //errCode |= clSetKernelArg(Kernel[i], 6, sizeof(int), &g_arch_sparse_feature_size);
-        //errCode |= clSetKernelArg(Kernel, 9, sizeof(int), &g_batch_size1);
-    }
+	    if (Device_Detected[ui] == false) {
+		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    } 
+        
+        ptr[ui * NUM_DEVS + 0] = nullptr;
+	    if (posix_memalign(&ptr[ui * NUM_DEVS + 0],4096, Nb_Of_Elements * NUM_CUS * sizeof(float))) {
+		    cout << endl << "HOST-Error: Out of Memory during memory allocation for RES array" << endl << endl;
+		    return EXIT_FAILURE;
+	    }
 
-    if (errCode != CL_SUCCESS) {
-		cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
-		return EXIT_FAILURE;
-	}
+        RES[ui * NUM_DEVS + 0] = reinterpret_cast<float *>(ptr[ui * NUM_DEVS + 0]);
     
-    // ------------------------------------------------------
-	// Step 4.3: Copy Input data from Host to Global Memory
-	// ------------------------------------------------------
-	#ifdef ALL_MESSAGES
-	cout << "HOST_Info: Copy Input data to Global Memory ..." << endl;
-	#endif
+        for (i = 1; i < NUM_CUS; i++)
+        {
+            ptr[ui * NUM_DEVS + i] = nullptr;
+    	    if (posix_memalign(&ptr[ui * NUM_DEVS + i],4096, Nb_Of_Elements * sizeof(float))) {
+	    	    cout << endl << "HOST-Error: Out of Memory during memory allocation for RES array" << endl << endl;
+		        return EXIT_FAILURE;
+	        }
+            RES[ui * NUM_DEVS + i] = reinterpret_cast<float *>(ptr[ui * NUM_DEVS + i]);
+        }
+
+	    // ------------------------------------------------------------------
+	    // Step 4.2: Create Buffers in Global Memory to store data
+	    //             o) GlobMem_BUF_DataIn_1 - stores DataIn_1
+        //             o) GlobMem_BUF_emb_l    - stores emb_l
+        //             o) GlobMem_BUF_lS_o     - stores lS_o
+        //             o) GlobMem_BUF_lS_i     - stores lS_i
+	    //             o) GlobMem_BUF_RES      - stores RES
+	    // ------------------------------------------------------------------
+	    #ifdef ALL_MESSAGES
+	    cout << "HOST-Info: Allocating buffers in Global Memory to store Input and Output Data ..." << endl;
+	    #endif
     
-    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_emb_l, 0, 0, NULL, NULL);
+        // Allocate Global Memory for GlobMem_BUF_DataIn_1
+	    // .......................................................
+    
+        GlobMem_BUF_DataIn_1[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, DATAIN_1_SIZE, DataIn_1, &errCode);
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_DataIn_1" << endl << endl;
+		    return EXIT_FAILURE;
+	    }
 
-	if (errCode != CL_SUCCESS)
-	{
-		cout << endl << "Host-Error: Failed to write emb_l to GlobMem_BUF_emb_l" << endl << endl;
-        return EXIT_FAILURE;
-	}
+	    // Allocate Global Memory for GlobMem_BUF_ptr_emb_l
+	    // .......................................................
+	    GlobMem_BUF_emb_l[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, g_num_sparse_features * sizeof(unsigned int), emb_l, &errCode);
+	    if (errCode != CL_SUCCESS)
+	    {
+		    cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_emb_l" << endl << endl;
+	    }
 
-    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_DataIn_1, 0, 0, NULL, NULL);
+	    // Allocate Global Memory for GlobMem_BUF_RES
+	    // .......................................................
+        for (i = 0; i < NUM_CUS; i++)
+        {
+            GlobMem_BUF_RES[ui * NUM_DEVS + i] = clCreateBuffer(Context[ui], CL_MEM_WRITE_ONLY | CL_MEM_USE_HOST_PTR, Nb_Of_Elements * sizeof(float), RES[ui * NUM_DEVS + i], &errCode);
+            if (errCode != CL_SUCCESS) {
+		        cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_RES" << endl << endl;
+		        return EXIT_FAILURE;
+            }
+	    }
 
-    if (errCode != CL_SUCCESS)
-    {
-        cout << endl << "Host-Error: Failed to write GlobMem_BUF_DataIn_1" << endl << endl;
-        return EXIT_FAILURE;
+        GlobMem_BUF_lS_o[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_o * sizeof(int), lS_o, &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_lS_o" << endl << endl;
+            return EXIT_FAILURE;
+        }
+
+        GlobMem_BUF_lS_i[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_i * sizeof(int), lS_i, &errCode);
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_lS_i" << endl << endl;
+        }
+
+	    // ----------------------------------------
+	    // Step 5.1: Set Kernel Arguments
+	    // ----------------------------------------
+
+        #ifdef ALL_MESSAGES
+	    cout << "HOST-Info: Setting Kernel arguments ..." << endl;
+	    #endif
+
+        for (i = 0; i < NUM_CUS; i++)
+        {    
+            errCode = clSetKernelArg(Kernel[ui * NUM_DEVS + i], 0, sizeof(cl_mem), &GlobMem_BUF_DataIn_1[ui]);
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 1, sizeof(cl_mem), &GlobMem_BUF_RES[ui * NUM_DEVS + i]);
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 2, sizeof(cl_mem), &GlobMem_BUF_emb_l[ui]);
+   	        errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 3, sizeof(cl_mem), &GlobMem_BUF_lS_o[ui]);
+	        errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 4, sizeof(cl_mem), &GlobMem_BUF_lS_i[ui]);
+	        //errCode |= clSetKernelArg(Kernel[i], 5, sizeof(int), &g_num_sparse_features);
+            //errCode |= clSetKernelArg(Kernel[i], 6, sizeof(int), &g_arch_sparse_feature_size);
+            //errCode |= clSetKernelArg(Kernel, 9, sizeof(int), &g_batch_size1);
+        }
+
+        if (errCode != CL_SUCCESS) {
+		    cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
+		    return EXIT_FAILURE;
+    	}
+    
+        // ------------------------------------------------------
+	    // Step 4.3: Copy Input data from Host to Global Memory
+	    // ------------------------------------------------------
+	    #ifdef ALL_MESSAGES
+	    cout << "HOST_Info: Copy Input data to Global Memory ..." << endl;
+	    #endif
+    
+        errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_emb_l[ui], 0, 0, NULL, NULL);
+
+	    if (errCode != CL_SUCCESS)
+	    {
+		    cout << endl << "Host-Error: Failed to write emb_l to GlobMem_BUF_emb_l" << endl << endl;
+            return EXIT_FAILURE;
+	    }
+
+        errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_DataIn_1[ui], 0, 0, NULL, NULL);
+
+        if (errCode != CL_SUCCESS)
+        {
+            cout << endl << "Host-Error: Failed to write GlobMem_BUF_DataIn_1" << endl << endl;
+            return EXIT_FAILURE;
+        }
+
+        for (i = 0; i < NUM_CUS; i++)
+        {
+            g_i_begin[ui * NUM_DEVS + i] = -1;
+            g_i_end[ui * NUM_DEVS + i] = -1;
+        }
+
+        g_sparse_offset_group_batch_size[ui] = -1;
+        g_sparse_index_group_batch_size[ui] = -1;
+
+	    ::clFinish(Command_Queue[ui]);
     }
 
-    for (i = 0; i < NUM_CUS; i++)
-    {
-        g_i_begin[i] = -1;
-        g_i_end[i] = -1;
-    }
-
-	::clFinish(Command_Queue);
     delete[] Platform_IDs;
 	delete[] Device_IDs;
 
@@ -589,27 +633,31 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 void alveo_exit()
 {
 	int i;
+    cl_uint ui;
     
-    clReleaseDevice(Target_Device_ID);
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {
+        clReleaseDevice(Target_Device_ID[ui]);
 
-    clReleaseMemObject(GlobMem_BUF_DataIn_1);
-	clReleaseMemObject(GlobMem_BUF_emb_l);
-    clReleaseMemObject(GlobMem_BUF_lS_o);
-    clReleaseMemObject(GlobMem_BUF_lS_i);
+        clReleaseMemObject(GlobMem_BUF_DataIn_1[ui]);
+	    clReleaseMemObject(GlobMem_BUF_emb_l[ui]);
+        clReleaseMemObject(GlobMem_BUF_lS_o[ui]);
+        clReleaseMemObject(GlobMem_BUF_lS_i[ui]);
 
-    for (i = 0; i < NUM_CUS; i++)
-        clReleaseMemObject(GlobMem_BUF_RES[i]);
+        for (i = 0; i < NUM_CUS; i++)
+            clReleaseMemObject(GlobMem_BUF_RES[ui * NUM_DEVS + i]);
 
-    for (i = 0; i < NUM_CUS; i++)
-        clReleaseKernel(Kernel[i]);
+        for (i = 0; i < NUM_CUS; i++)
+            clReleaseKernel(Kernel[ui * NUM_DEVS + i]);
 
-	clReleaseProgram(Program);
-	clReleaseCommandQueue(Command_Queue);
-	clReleaseContext(Context);
+	    clReleaseProgram(Program[ui]);
+	    clReleaseCommandQueue(Command_Queue[ui]);
+	    clReleaseContext(Context[ui]);
 
-	for (i = 0; i < NUM_CUS; i++)
-        free(RES[i]);
-    
+	    for (i = 0; i < NUM_CUS; i++)
+            free(RES[ui * NUM_DEVS + i]);
+    }
+
     free(DataIn_1);
     free(emb_l);
     free(lS_o);
@@ -620,21 +668,21 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
 {	
 
     int i;
-    cl_int	errCode;
+    cl_int	errCode = CL_SUCCESS;
+    cl_uint ui;
     py::buffer_info buf_o = np_lS_o.request();
 	py::buffer_info buf_i = np_lS_i.request();
 	int *ptr_buf_o = reinterpret_cast<int *>(buf_o.ptr);
 	int *ptr_buf_i = reinterpret_cast<int *>(buf_i.ptr);
     int lS_o_length = g_num_sparse_features * sparse_offset_group_batch_size;
 	int lS_i_length = g_num_sparse_features * sparse_index_group_batch_size;
-    int sparse_offset_group_batch_sizes[NUM_CUS];
-    cl_event K_exe_event[NUM_CUS];
-    int i_begin[NUM_CUS];
-    int i_end[NUM_CUS];
+    int sparse_offset_group_batch_sizes[NUM_CUS * NUM_DEVS];
+    cl_event K_exe_event[NUM_CUS * NUM_DEVS];
+    int i_begin[NUM_CUS * NUM_DEVS];
+    int i_end[NUM_CUS * NUM_DEVS];
 
     memcpy(lS_o, ptr_buf_o, lS_o_length * sizeof(int));
     memcpy(lS_i, ptr_buf_i, lS_i_length * sizeof(int));
-    
     
     //int sparse_offset_group_batch_size1 = sparse_offset_group_batch_size / 2;
     /*
@@ -652,141 +700,171 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
         if (errCode != CL_SUCCESS)
             cout << endl << "Host-ERROR: Failed to set Kernel argument 9" << endl;
     }*/
-    
-    for (i = 0; i < NUM_CUS - 1; i++)
-        sparse_offset_group_batch_sizes[i] = sparse_offset_group_batch_size / NUM_CUS;
-    sparse_offset_group_batch_sizes[NUM_CUS - 1] = sparse_offset_group_batch_size - sparse_offset_group_batch_sizes[NUM_CUS - 2];
+  
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {    
+	    if (Device_Detected[ui] == false) {
+		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    } 
+  
+        for (i = 0; i < NUM_CUS - 1; i++)
+            sparse_offset_group_batch_sizes[ui * NUM_DEVS + i] = sparse_offset_group_batch_size / NUM_CUS;
+        if (NUM_CUS >= 2)
+            sparse_offset_group_batch_sizes[ui * NUM_DEVS + NUM_CUS - 1] = sparse_offset_group_batch_size - sparse_offset_group_batch_sizes[ui * NUM_DEVS + NUM_CUS - 2];
 
-    for (i = 0; i < NUM_CUS; i++)
-    {
-        if (i == 0)
-            i_begin[i] = 0;
-        else
-            i_begin[i] = i_end[i - 1];
-        i_end[i] = i_begin[i] + sparse_offset_group_batch_sizes[i];
-    }
-	
-    if (g_sparse_offset_group_batch_size != sparse_offset_group_batch_size)
-    {
-        g_sparse_offset_group_batch_size = sparse_offset_group_batch_size;
         for (i = 0; i < NUM_CUS; i++)
-            errCode |= clSetKernelArg(Kernel[i], 5, sizeof(int), &sparse_offset_group_batch_size);
-    }
-
-    if (g_sparse_index_group_batch_size != sparse_index_group_batch_size)
-    {
-        g_sparse_index_group_batch_size = sparse_index_group_batch_size;
-        for (i = 0; i < NUM_CUS; i++)
-            errCode |= clSetKernelArg(Kernel[i], 6, sizeof(int), &sparse_index_group_batch_size);
-    }
-
-    for (i = 0; i < NUM_CUS; i++)
-    {
-        if (g_i_begin[i] != i_begin[i])
         {
-            g_i_begin[i] = i_begin[i];
-            errCode |= clSetKernelArg(Kernel[i], 7, sizeof(int), &i_begin[i]);
+            if (i == 0)
+                i_begin[ui * NUM_DEVS + i] = 0;
+            else
+                i_begin[ui * NUM_DEVS + i] = i_end[ui * NUM_DEVS + i - 1];
+            i_end[ui * NUM_DEVS + i] = i_begin[ui * NUM_DEVS + i] + sparse_offset_group_batch_sizes[ui * NUM_DEVS + i];
         }
-        if (g_i_end[i] != i_end[i])
+	
+        if (g_sparse_offset_group_batch_size[ui] != sparse_offset_group_batch_size)
         {
-            g_i_end[i] = i_end[i];
-            errCode |= clSetKernelArg(Kernel[i], 8, sizeof(int), &i_end[i]);
+            g_sparse_offset_group_batch_size[ui] = sparse_offset_group_batch_size;
+            for (i = 0; i < NUM_CUS; i++)
+                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 5, sizeof(int), &sparse_offset_group_batch_size);
         }
 
+        if (g_sparse_index_group_batch_size[ui] != sparse_index_group_batch_size)
+        {
+            g_sparse_index_group_batch_size[ui] = sparse_index_group_batch_size;
+            for (i = 0; i < NUM_CUS; i++)
+                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 6, sizeof(int), &sparse_index_group_batch_size);
+        }
+
+        for (i = 0; i < NUM_CUS; i++)
+        {
+            if (g_i_begin[ui * NUM_DEVS + i] != i_begin[ui * NUM_DEVS + i])
+            {
+                g_i_begin[ui * NUM_DEVS + i] = i_begin[ui * NUM_DEVS + i];
+                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 7, sizeof(int), &i_begin[ui * NUM_DEVS + i]);
+            }
+            if (g_i_end[ui * NUM_DEVS + i] != i_end[ui * NUM_DEVS + i])
+            {
+                g_i_end[ui * NUM_DEVS + i] = i_end[ui * NUM_DEVS + i];
+                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 8, sizeof(int), &i_end[ui * NUM_DEVS + i]);
+            }
+
+        }
+
+        if (errCode != CL_SUCCESS)
+            cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
+        // ------------------------------------------------------
+	    // Step 4.3: Copy Input data from Host to Global Memory
+	    // ------------------------------------------------------
+	    #ifdef ALL_MESSAGES
+	    cout << "HOST_Info: Copy Input data to Global Memory ..." << endl;
+	    #endif   
+        errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_lS_o[ui], 0, 0, NULL, NULL);
+
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "Host-Error: Failed to write lS_o to GlobMem_BUF_lS_o" << endl << endl;
+		    //return EXIT_FAILURE;
+	    }
+
+	    errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_lS_i[ui], 0, 0, NULL, NULL);
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "Host-Error: Failed to write lS_i to GlobMem_BUF_lS_i" << endl << endl;
+		    //return EXIT_FAILURE;
+	    }
+    
+        errCode = clEnqueueBarrierWithWaitList(Command_Queue[ui], 0, NULL, NULL);
+        if (errCode != CL_SUCCESS)
+            cout << endl << "Host-Error: Failed to enqueue barrier with wait list" << endl << endl;
+
+        // ============================================================================
+	    // Step 5: Set Kernel Arguments and Execute Kernel
+	    // ============================================================================
+	    // ----------------------------------------------------
+	    //  Argument Nb    Description
+	    // ----------------------------------------------------
+	    //     0           GlobMem_BUF_DataIn_1
+	    //     1           GlobMem_BUF_DataIn_2
+	    //     2           GlobMem_BUF_RES
+	    // ============================================================================
+	    #ifdef ALL_MESSAGES
+	    cout << endl;
+	    cout << "HOST-Info: ============================================================= " << endl;
+	    cout << "HOST-Info: (Step 5) Set Kernel Arguments and Execute Kernel              " << endl;
+	    cout << "HOST-Info: ============================================================= " << endl;
+	    #endif
+	
+	    // ----------------------------------------
+	    // Step 5.2: Execute Kernel
+	    // ----------------------------------------
+	    //size_t globalSize[1];
+	    //size_t localSize[1];
+	    //globalSize[0] = 1;
+	    //localSize[0]  = 1;
+    
+        for (i = 0; i < NUM_CUS; i++)
+            errCode |= clEnqueueTask(Command_Queue[ui], Kernel[ui * NUM_DEVS + i], 0, NULL, &K_exe_event[ui * NUM_DEVS + i]);
+
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "HOST-Error: Failed to execute Kernel" << endl << endl;
+		    //return EXIT_FAILURE;
+	    }
+
+        for (i = 0; i < NUM_CUS; i++)
+            errCode |= clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_RES[ui * NUM_DEVS + i], CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[ui * NUM_DEVS + i], NULL);
+
+	    if (errCode != CL_SUCCESS) {
+		    cout << endl << "Host-Error: Failed to write RES from GlobMem_BUF_RES" << endl << endl;
+		    //return EXIT_FAILURE;
+	    }
+
+	    // ============================================================================
+	    // Step 6: Read and Store the Output Results
+	    // ============================================================================
+	    // The Output Results are stored in the RES.txt file
+	    // 
+	    // ============================================================================
+	    #ifdef ALL_MESSAGES
+	    cout << endl;
+	    cout << "HOST-Info: ============================================================= " << endl;
+	    cout << "HOST-Info: (Step 6) Read, Store and Check the Output Results             " << endl;
+	    cout << "HOST-Info: ============================================================= " << endl;
+	    #endif
+
+	    // ------------------------------------------------------
+	    // Step 6.1: Read output Result to Host memory (RES)
+	    // ------------------------------------------------------
+
+	    ::clFlush(Command_Queue[ui]);
+        //::clFinish(Command_Queue[ui]); // flush everything in the Command_Queue
+
+	    //cout << endl << "HOST-Info: DONE" << endl << endl;
+    }
+    
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {    
+	    if (Device_Detected[ui] == false) {
+		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    } 
+        
+        ::clFinish(Command_Queue[ui]);
+
+        for (i = 1; i < NUM_CUS; i++)
+            memcpy((void *)(RES[ui * NUM_DEVS + 0] + i_begin[ui * NUM_DEVS + i] * g_arch_sparse_feature_size), (const void *)RES[ui * NUM_DEVS + i], sparse_offset_group_batch_sizes[ui * NUM_DEVS + i] * g_arch_sparse_feature_size * sizeof(float));
+    
+        for (i = 0; i < NUM_CUS; i++)
+            clReleaseEvent(K_exe_event[ui * NUM_DEVS + i]);
     }
 
-    if (errCode |= CL_SUCCESS)
-        cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
-    // ------------------------------------------------------
-	// Step 4.3: Copy Input data from Host to Global Memory
-	// ------------------------------------------------------
-	#ifdef ALL_MESSAGES
-	cout << "HOST_Info: Copy Input data to Global Memory ..." << endl;
-	#endif   
-    errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_lS_o, 0, 0, NULL, NULL);
-
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "Host-Error: Failed to write lS_o to GlobMem_BUF_lS_o" << endl << endl;
-		//return EXIT_FAILURE;
-	}
-
-	errCode = clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_lS_i, 0, 0, NULL, NULL);
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "Host-Error: Failed to write lS_i to GlobMem_BUF_lS_i" << endl << endl;
-		//return EXIT_FAILURE;
-	}
-    
-    errCode = clEnqueueBarrierWithWaitList(Command_Queue, 0, NULL, NULL);
-    if (errCode != CL_SUCCESS)
-        cout << endl << "Host-Error: Failed to enqueue barrier with wait list" << endl << endl;
-
-    // ============================================================================
-	// Step 5: Set Kernel Arguments and Execute Kernel
-	// ============================================================================
-	// ----------------------------------------------------
-	//  Argument Nb    Description
-	// ----------------------------------------------------
-	//     0           GlobMem_BUF_DataIn_1
-	//     1           GlobMem_BUF_DataIn_2
-	//     2           GlobMem_BUF_RES
-	// ============================================================================
-	#ifdef ALL_MESSAGES
-	cout << endl;
-	cout << "HOST-Info: ============================================================= " << endl;
-	cout << "HOST-Info: (Step 5) Set Kernel Arguments and Execute Kernel              " << endl;
-	cout << "HOST-Info: ============================================================= " << endl;
-	#endif
-	
-	// ----------------------------------------
-	// Step 5.2: Execute Kernel
-	// ----------------------------------------
-	size_t globalSize[1];
-	size_t localSize[1];
-	globalSize[0] = 1;
-	localSize[0]  = 1;
-    
-    for (i = 0; i < NUM_CUS; i++)
-        errCode |= clEnqueueTask(Command_Queue, Kernel[i], 0, NULL, &K_exe_event[i]);
-
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "HOST-Error: Failed to execute Kernel" << endl << endl;
-		//return EXIT_FAILURE;
-	}
-
-    for (i = 0; i < NUM_CUS; i++)
-        errCode |= clEnqueueMigrateMemObjects(Command_Queue, 1, &GlobMem_BUF_RES[i], CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[i], NULL);
-
-	if (errCode != CL_SUCCESS) {
-		cout << endl << "Host-Error: Failed to write RES from GlobMem_BUF_RES" << endl << endl;
-		//return EXIT_FAILURE;
-	}
-
-	// ============================================================================
-	// Step 6: Read and Store the Output Results
-	// ============================================================================
-	// The Output Results are stored in the RES.txt file
-	// 
-	// ============================================================================
-	#ifdef ALL_MESSAGES
-	cout << endl;
-	cout << "HOST-Info: ============================================================= " << endl;
-	cout << "HOST-Info: (Step 6) Read, Store and Check the Output Results             " << endl;
-	cout << "HOST-Info: ============================================================= " << endl;
-	#endif
-
-	// ------------------------------------------------------
-	// Step 6.1: Read output Result to Host memory (RES)
-	// ------------------------------------------------------
-
-	::clFinish(Command_Queue); // flush everything in the Command_Queue
-
-	//cout << endl << "HOST-Info: DONE" << endl << endl;
-    
-    for (i = 1; i < NUM_CUS; i++)
-        memcpy((void *)(RES[0] + i_begin[i] * g_arch_sparse_feature_size), (const void *)RES[i], sparse_offset_group_batch_sizes[i] * g_arch_sparse_feature_size * sizeof(float));
-    
-    for (i = 0; i < NUM_CUS; i++)
-        clReleaseEvent(K_exe_event[i]);
+    #if NUM_DEVS == 2
+    for (i = 0; i < sparse_offset_group_batch_size * g_arch_sparse_feature_size; i++)
+    {
+        RES[0][i] += RES[NUM_DEVS][i];
+        RES[0][i] /= 2;
+    }
+    #endif
 
     return py::array_t<float>(
 			{sparse_offset_group_batch_size * g_arch_sparse_feature_size},
