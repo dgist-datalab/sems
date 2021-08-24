@@ -620,9 +620,27 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 
         g_sparse_offset_group_batch_size[ui] = -1;
         g_sparse_index_group_batch_size[ui] = -1;
-
-	    ::clFinish(Command_Queue[ui]);
     }
+
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {    
+	    if (Device_Detected[ui] == false) {
+		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    } 
+        ::clFlush(Command_Queue[ui]);
+    }
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {    
+	    if (Device_Detected[ui] == false) {
+		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    } 
+        ::clFinish(Command_Queue[ui]);
+    }
+
 
     delete[] Platform_IDs;
 	delete[] Device_IDs;
@@ -835,10 +853,20 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
 	    // Step 6.1: Read output Result to Host memory (RES)
 	    // ------------------------------------------------------
 
-	    ::clFlush(Command_Queue[ui]);
+	    //::clFlush(Command_Queue[ui]);
         //::clFinish(Command_Queue[ui]); // flush everything in the Command_Queue
 
 	    //cout << endl << "HOST-Info: DONE" << endl << endl;
+    }
+    
+    for (ui = 0; ui < NUM_DEVS; ui++)
+    {    
+	    if (Device_Detected[ui] == false) {
+		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    continue;
+            //return EXIT_FAILURE;
+	    }
+        ::clFlush(Command_Queue[ui]);
     }
     
     for (ui = 0; ui < NUM_DEVS; ui++)
