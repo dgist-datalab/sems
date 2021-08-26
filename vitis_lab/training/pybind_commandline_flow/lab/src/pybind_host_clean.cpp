@@ -40,6 +40,7 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <vector>
+#include <pthread.h>
 
 namespace py = pybind11;
 using namespace std;
@@ -90,6 +91,12 @@ cl_program Program[NUM_DEVS];
 cl_device_id Target_Device_ID[NUM_DEVS];
 bool Device_Detected[NUM_DEVS];
 
+struct thread_data
+{
+    int sparse_offset_group_batch_size;
+    int sparse_index_group_batch_size;
+    int ui;
+};
 
 // ********************************************************************************** //
 // ---------------------------------------------------------------------------------- //
@@ -682,10 +689,171 @@ void alveo_exit()
     free(lS_i);
 }
 
+void *compute(void *thread_arg)
+{
+    struct thread_data *my_data;
+    cl_event K_exe_event[NUM_CUS];
+    int sparse_offset_group_batch_sizes[NUM_CUS];
+    int i_begin[NUM_CUS];
+    int i_end[NUM_CUS];
+    cl_int	errCode;
+    int sparse_offset_group_batch_size;
+    int sparse_index_group_batch_size;
+    int ui;
+    int i;
+
+    my_data = (struct thread_data *) thread_arg;
+    errCode = CL_SUCCESS;
+    sparse_offset_group_batch_size = my_data->sparse_offset_group_batch_size;
+    sparse_index_group_batch_size = my_data->sparse_index_group_batch_size;
+    ui = my_data->ui; 
+    
+    for (i = 0; i < NUM_CUS - 1; i++)
+        sparse_offset_group_batch_sizes[i] = sparse_offset_group_batch_size / NUM_CUS;
+    if (NUM_CUS >= 2)
+        sparse_offset_group_batch_sizes[NUM_CUS - 1] = sparse_offset_group_batch_size - sparse_offset_group_batch_sizes[NUM_CUS - 2];
+
+    for (i = 0; i < NUM_CUS; i++)
+    {
+        if (i == 0)
+            i_begin[i] = 0;
+        else
+            i_begin[i] = i_end[i - 1];
+        i_end[i] = i_begin[i] + sparse_offset_group_batch_sizes[i];
+    }
+	
+    if (g_sparse_offset_group_batch_size[ui] != sparse_offset_group_batch_size)
+    {
+        g_sparse_offset_group_batch_size[ui] = sparse_offset_group_batch_size;
+        for (i = 0; i < NUM_CUS; i++)
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 5, sizeof(int), &sparse_offset_group_batch_size);
+    }
+
+    if (g_sparse_index_group_batch_size[ui] != sparse_index_group_batch_size)
+    {
+        g_sparse_index_group_batch_size[ui] = sparse_index_group_batch_size;
+        for (i = 0; i < NUM_CUS; i++)
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 6, sizeof(int), &sparse_index_group_batch_size);
+    }
+
+    for (i = 0; i < NUM_CUS; i++)
+    {
+        if (g_i_begin[ui * NUM_DEVS + i] != i_begin[i])
+        {
+            g_i_begin[ui * NUM_DEVS + i] = i_begin[i];
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 7, sizeof(int), &i_begin[i]);
+        }
+        if (g_i_end[ui * NUM_DEVS + i] != i_end[i])
+        {
+            g_i_end[ui * NUM_DEVS + i] = i_end[i];
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 8, sizeof(int), &i_end[i]);
+        }
+    }
+
+    if (errCode != CL_SUCCESS)
+        cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
+    // ------------------------------------------------------
+    // Step 4.3: Copy Input data from Host to Global Memory
+    // ------------------------------------------------------
+    #ifdef ALL_MESSAGES
+    cout << "HOST_Info: Copy Input data to Global Memory ..." << endl;
+    #endif   
+    errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_lS_o[ui], 0, 0, NULL, NULL);
+
+    if (errCode != CL_SUCCESS) {
+	    cout << endl << "Host-Error: Failed to write lS_o to GlobMem_BUF_lS_o" << endl << endl;
+	    //return EXIT_FAILURE;
+    }
+
+    errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_lS_i[ui], 0, 0, NULL, NULL);
+    if (errCode != CL_SUCCESS) {
+	    cout << endl << "Host-Error: Failed to write lS_i to GlobMem_BUF_lS_i" << endl << endl;
+	    //return EXIT_FAILURE;
+    }
+    
+    errCode = clEnqueueBarrierWithWaitList(Command_Queue[ui], 0, NULL, NULL);
+    if (errCode != CL_SUCCESS)
+        cout << endl << "Host-Error: Failed to enqueue barrier with wait list" << endl << endl;
+
+    // ============================================================================
+    // Step 5: Set Kernel Arguments and Execute Kernel
+    // ============================================================================
+    // ----------------------------------------------------
+    //  Argument Nb    Description
+    // ----------------------------------------------------
+    //     0           GlobMem_BUF_DataIn_1
+    //     1           GlobMem_BUF_DataIn_2
+    //     2           GlobMem_BUF_RES
+    // ============================================================================
+    #ifdef ALL_MESSAGES
+    cout << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 5) Set Kernel Arguments and Execute Kernel              " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    #endif
+	
+    // ----------------------------------------
+    // Step 5.2: Execute Kernel
+    // ----------------------------------------
+    //size_t globalSize[1];
+    //size_t localSize[1];
+    //globalSize[0] = 1;
+    //localSize[0]  = 1;
+    
+    for (i = 0; i < NUM_CUS; i++)
+        errCode |= clEnqueueTask(Command_Queue[ui], Kernel[ui * NUM_DEVS + i], 0, NULL, &K_exe_event[i]);
+
+    if (errCode != CL_SUCCESS) {
+	    cout << endl << "HOST-Error: Failed to execute Kernel" << endl << endl;
+	    //return EXIT_FAILURE;
+    }
+
+    for (i = 0; i < NUM_CUS; i++)
+        errCode |= clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_RES[ui * NUM_DEVS + i], CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[i], NULL);
+
+    if (errCode != CL_SUCCESS) {
+	    cout << endl << "Host-Error: Failed to write RES from GlobMem_BUF_RES" << endl << endl;
+	    //return EXIT_FAILURE;
+    }
+
+    // ============================================================================
+    // Step 6: Read and Store the Output Results
+    // ============================================================================
+    // The Output Results are stored in the RES.txt file
+    // 
+    // ============================================================================
+    #ifdef ALL_MESSAGES
+    cout << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    cout << "HOST-Info: (Step 6) Read, Store and Check the Output Results             " << endl;
+    cout << "HOST-Info: ============================================================= " << endl;
+    #endif
+
+    // ------------------------------------------------------
+    // Step 6.1: Read output Result to Host memory (RES)
+    // ------------------------------------------------------
+
+    //::clFlush(Command_Queue[ui]);
+    //::clFinish(Command_Queue[ui]); // flush everything in the Command_Queue
+
+    //cout << endl << "HOST-Info: DONE" << endl << endl;
+    
+    ::clFinish(Command_Queue[ui]);
+
+    for (i = 1; i < NUM_CUS; i++)
+        memcpy((void *)(RES[ui * NUM_DEVS + 0] + i_begin[i] * g_arch_sparse_feature_size), (const void *)RES[ui * NUM_DEVS + i], sparse_offset_group_batch_sizes[i] * g_arch_sparse_feature_size * sizeof(float));
+    
+    for (i = 0; i < NUM_CUS; i++)
+        clReleaseEvent(K_exe_event[i]);
+}
+
 py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int sparse_offset_group_batch_size, int sparse_index_group_batch_size)
 {	
-
+    pthread_t threads[NUM_DEVS];
+    int thread_id;
+    struct thread_data td[NUM_DEVS];
     int i;
+    int status;
     cl_int	errCode = CL_SUCCESS;
     cl_uint ui;
     py::buffer_info buf_o = np_lS_o.request();
@@ -694,10 +862,10 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
 	int *ptr_buf_i = reinterpret_cast<int *>(buf_i.ptr);
     int lS_o_length = g_num_sparse_features * sparse_offset_group_batch_size;
 	int lS_i_length = g_num_sparse_features * sparse_index_group_batch_size;
-    int sparse_offset_group_batch_sizes[NUM_CUS * NUM_DEVS];
-    cl_event K_exe_event[NUM_CUS * NUM_DEVS];
-    int i_begin[NUM_CUS * NUM_DEVS];
-    int i_end[NUM_CUS * NUM_DEVS];
+    //int sparse_offset_group_batch_sizes[NUM_CUS * NUM_DEVS];
+    //cl_event K_exe_event[NUM_CUS * NUM_DEVS];
+    //int i_begin[NUM_CUS * NUM_DEVS];
+    //int i_end[NUM_CUS * NUM_DEVS];
 
     memcpy(lS_o, ptr_buf_o, lS_o_length * sizeof(int));
     memcpy(lS_i, ptr_buf_i, lS_i_length * sizeof(int));
@@ -719,172 +887,23 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
             cout << endl << "Host-ERROR: Failed to set Kernel argument 9" << endl;
     }*/
   
-    for (ui = 0; ui < NUM_DEVS; ui++)
-    {    
-	    if (Device_Detected[ui] == false) {
-		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
-		    continue;
-            //return EXIT_FAILURE;
-	    } 
-  
-        for (i = 0; i < NUM_CUS - 1; i++)
-            sparse_offset_group_batch_sizes[ui * NUM_DEVS + i] = sparse_offset_group_batch_size / NUM_CUS;
-        if (NUM_CUS >= 2)
-            sparse_offset_group_batch_sizes[ui * NUM_DEVS + NUM_CUS - 1] = sparse_offset_group_batch_size - sparse_offset_group_batch_sizes[ui * NUM_DEVS + NUM_CUS - 2];
-
-        for (i = 0; i < NUM_CUS; i++)
-        {
-            if (i == 0)
-                i_begin[ui * NUM_DEVS + i] = 0;
-            else
-                i_begin[ui * NUM_DEVS + i] = i_end[ui * NUM_DEVS + i - 1];
-            i_end[ui * NUM_DEVS + i] = i_begin[ui * NUM_DEVS + i] + sparse_offset_group_batch_sizes[ui * NUM_DEVS + i];
-        }
-	
-        if (g_sparse_offset_group_batch_size[ui] != sparse_offset_group_batch_size)
-        {
-            g_sparse_offset_group_batch_size[ui] = sparse_offset_group_batch_size;
-            for (i = 0; i < NUM_CUS; i++)
-                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 5, sizeof(int), &sparse_offset_group_batch_size);
-        }
-
-        if (g_sparse_index_group_batch_size[ui] != sparse_index_group_batch_size)
-        {
-            g_sparse_index_group_batch_size[ui] = sparse_index_group_batch_size;
-            for (i = 0; i < NUM_CUS; i++)
-                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 6, sizeof(int), &sparse_index_group_batch_size);
-        }
-
-        for (i = 0; i < NUM_CUS; i++)
-        {
-            if (g_i_begin[ui * NUM_DEVS + i] != i_begin[ui * NUM_DEVS + i])
-            {
-                g_i_begin[ui * NUM_DEVS + i] = i_begin[ui * NUM_DEVS + i];
-                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 7, sizeof(int), &i_begin[ui * NUM_DEVS + i]);
-            }
-            if (g_i_end[ui * NUM_DEVS + i] != i_end[ui * NUM_DEVS + i])
-            {
-                g_i_end[ui * NUM_DEVS + i] = i_end[ui * NUM_DEVS + i];
-                errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 8, sizeof(int), &i_end[ui * NUM_DEVS + i]);
-            }
-
-        }
-
-        if (errCode != CL_SUCCESS)
-            cout << endl << "Host-ERROR: Failed to set Kernel arguments" << endl << endl;
-        // ------------------------------------------------------
-	    // Step 4.3: Copy Input data from Host to Global Memory
-	    // ------------------------------------------------------
-	    #ifdef ALL_MESSAGES
-	    cout << "HOST_Info: Copy Input data to Global Memory ..." << endl;
-	    #endif   
-        errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_lS_o[ui], 0, 0, NULL, NULL);
-
-	    if (errCode != CL_SUCCESS) {
-		    cout << endl << "Host-Error: Failed to write lS_o to GlobMem_BUF_lS_o" << endl << endl;
-		    //return EXIT_FAILURE;
-	    }
-
-	    errCode = clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_lS_i[ui], 0, 0, NULL, NULL);
-	    if (errCode != CL_SUCCESS) {
-		    cout << endl << "Host-Error: Failed to write lS_i to GlobMem_BUF_lS_i" << endl << endl;
-		    //return EXIT_FAILURE;
-	    }
-    
-        errCode = clEnqueueBarrierWithWaitList(Command_Queue[ui], 0, NULL, NULL);
-        if (errCode != CL_SUCCESS)
-            cout << endl << "Host-Error: Failed to enqueue barrier with wait list" << endl << endl;
-
-        // ============================================================================
-	    // Step 5: Set Kernel Arguments and Execute Kernel
-	    // ============================================================================
-	    // ----------------------------------------------------
-	    //  Argument Nb    Description
-	    // ----------------------------------------------------
-	    //     0           GlobMem_BUF_DataIn_1
-	    //     1           GlobMem_BUF_DataIn_2
-	    //     2           GlobMem_BUF_RES
-	    // ============================================================================
-	    #ifdef ALL_MESSAGES
-	    cout << endl;
-	    cout << "HOST-Info: ============================================================= " << endl;
-	    cout << "HOST-Info: (Step 5) Set Kernel Arguments and Execute Kernel              " << endl;
-	    cout << "HOST-Info: ============================================================= " << endl;
-	    #endif
-	
-	    // ----------------------------------------
-	    // Step 5.2: Execute Kernel
-	    // ----------------------------------------
-	    //size_t globalSize[1];
-	    //size_t localSize[1];
-	    //globalSize[0] = 1;
-	    //localSize[0]  = 1;
-    
-        for (i = 0; i < NUM_CUS; i++)
-            errCode |= clEnqueueTask(Command_Queue[ui], Kernel[ui * NUM_DEVS + i], 0, NULL, &K_exe_event[ui * NUM_DEVS + i]);
-
-	    if (errCode != CL_SUCCESS) {
-		    cout << endl << "HOST-Error: Failed to execute Kernel" << endl << endl;
-		    //return EXIT_FAILURE;
-	    }
-
-        for (i = 0; i < NUM_CUS; i++)
-            errCode |= clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_RES[ui * NUM_DEVS + i], CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[ui * NUM_DEVS + i], NULL);
-
-	    if (errCode != CL_SUCCESS) {
-		    cout << endl << "Host-Error: Failed to write RES from GlobMem_BUF_RES" << endl << endl;
-		    //return EXIT_FAILURE;
-	    }
-
-	    // ============================================================================
-	    // Step 6: Read and Store the Output Results
-	    // ============================================================================
-	    // The Output Results are stored in the RES.txt file
-	    // 
-	    // ============================================================================
-	    #ifdef ALL_MESSAGES
-	    cout << endl;
-	    cout << "HOST-Info: ============================================================= " << endl;
-	    cout << "HOST-Info: (Step 6) Read, Store and Check the Output Results             " << endl;
-	    cout << "HOST-Info: ============================================================= " << endl;
-	    #endif
-
-	    // ------------------------------------------------------
-	    // Step 6.1: Read output Result to Host memory (RES)
-	    // ------------------------------------------------------
-
-	    //::clFlush(Command_Queue[ui]);
-        //::clFinish(Command_Queue[ui]); // flush everything in the Command_Queue
-
-	    //cout << endl << "HOST-Info: DONE" << endl << endl;
-    }
-    
-    for (ui = 0; ui < NUM_DEVS; ui++)
-    {    
-	    if (Device_Detected[ui] == false) {
+    for (i = 0; i < NUM_DEVS; i++)
+    {
+        if (Device_Detected[i] == false) {
 		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
 		    continue;
             //return EXIT_FAILURE;
 	    }
-        ::clFlush(Command_Queue[ui]);
+        td[i].sparse_offset_group_batch_size = sparse_offset_group_batch_size;
+        td[i].sparse_index_group_batch_size = sparse_index_group_batch_size;
+        td[i].ui = i;
+        thread_id = pthread_create(&threads[i], NULL, compute, (void *)&td[i]);
+        if (thread_id < 0)
+            perror("thread create error: ");
     }
-    
-    for (ui = 0; ui < NUM_DEVS; ui++)
-    {    
-	    if (Device_Detected[ui] == false) {
-		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
-		    continue;
-            //return EXIT_FAILURE;
-	    } 
-        
-        ::clFinish(Command_Queue[ui]);
 
-        for (i = 1; i < NUM_CUS; i++)
-            memcpy((void *)(RES[ui * NUM_DEVS + 0] + i_begin[ui * NUM_DEVS + i] * g_arch_sparse_feature_size), (const void *)RES[ui * NUM_DEVS + i], sparse_offset_group_batch_sizes[ui * NUM_DEVS + i] * g_arch_sparse_feature_size * sizeof(float));
-    
-        for (i = 0; i < NUM_CUS; i++)
-            clReleaseEvent(K_exe_event[ui * NUM_DEVS + i]);
-    }
+    for (i = 0; i < NUM_DEVS; i++)
+        pthread_join(threads[i], (void **)&status);
 
     #if NUM_DEVS == 2
     for (i = 0; i < sparse_offset_group_batch_size * g_arch_sparse_feature_size; i++)
