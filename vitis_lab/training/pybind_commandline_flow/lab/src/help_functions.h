@@ -25,8 +25,9 @@ int loadFile2Memory(const char *filename, char **result);
 int *read_vector_file(const char *File_Name, int *Nb_Of_Elements);
 void gen_int_values(int *Array, int Nb_Of_Elements, int Period);
 void print_int_table(int *Array, int Nb_Of_Elements, int Nb_Of_Columns, int Nb_Of_Char_Per_Column);
-float *read_emb_file(const char *File_Name, const unsigned int size, unsigned int start_offset);
-unsigned int *create_emb_l(const char *File_Name, const unsigned int size, unsigned int start_offset, int nun_sparse_features);
+float *read_emb_file(const char *File_Name, const unsigned int size, unsigned int start_offset, unsigned int *table_lists, unsigned int *orig_emb_l, unsigned int list_start_offset, unsigned int list_end_offset);
+unsigned int *create_emb_l(const char *File_Name, const unsigned int size, unsigned int start_offset, int nun_sparse_features, unsigned int DataIn_1_size);
+unsigned int *split_emb_l(unsigned int *emb_l, int num_devs, int *start_index);
 
 //unsigned int *create_emb_l(const char *File_Name, const unsigned int size, unsigned int start_offset, int nun_sparse_features, unsigned int *start_tables, unsigned int data_size, unsigned int *start_offsets, unsigned int *sizes, int num_ddrs);
 

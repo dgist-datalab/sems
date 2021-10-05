@@ -104,13 +104,17 @@ int *read_vector_file(const char *File_Name, int *Nb_Of_Elements) {
   return Array;
 }
 
-float *read_emb_file(const char *File_Name, unsigned int size, unsigned int start_offset)
+float *read_emb_file(const char *File_Name, unsigned int size, unsigned int start_offset, unsigned int *table_lists, unsigned int *emb_l, unsigned int list_start_offset, unsigned int list_end_offset)
 {
 	float *Array;
 	void *ptr = nullptr;
     int ret;
     int max_size = 2147479552;
     unsigned int array_offset = 0;
+    unsigned int i;
+    unsigned int new_size;
+    unsigned int new_start_offset;
+    unsigned int table_num;
 	
 	if (posix_memalign(&ptr,4096, size)) {
 		cout << endl << "HOST-Error: Out of Memory during memory allocation for Array" << endl << endl;
@@ -118,34 +122,42 @@ float *read_emb_file(const char *File_Name, unsigned int size, unsigned int star
   	}
   	Array = reinterpret_cast<float *>(ptr);
 	int fd = open(File_Name, O_RDONLY);
-  
-    while (size > max_size)
+
+    for (i = list_start_offset; i < list_end_offset; i++)
     {
-        ret = pread(fd, Array + array_offset, max_size, start_offset);
-        if (ret != max_size)
+        table_num = table_lists[i];
+        new_size = (emb_l[table_num + 1] - emb_l[table_num]) * sizeof(float);
+        new_start_offset = emb_l[table_num] * sizeof(float) + start_offset;
+  
+        while (new_size > max_size)
+        {
+            ret = pread(fd, Array + array_offset, max_size, new_start_offset);
+            if (ret != max_size)
+	        {
+		        cout << "pread error" << endl;
+                cout << "size: " << max_size << endl;
+                //cout << "offset: " << offset << endl;
+                cout << "ret: " << ret << endl;
+                cout << "fd: " << fd << endl;
+                perror("a");
+	        }
+            new_size -= max_size;
+            new_start_offset += max_size;
+            array_offset += max_size / sizeof(float);
+        }
+    
+        ret = pread(fd, Array + array_offset, new_size, new_start_offset);
+	    if (ret != new_size)
 	    {
 		    cout << "pread error" << endl;
-            cout << "size: " << max_size << endl;
+            cout << "size: " << new_size << endl;
             //cout << "offset: " << offset << endl;
             cout << "ret: " << ret << endl;
             cout << "fd: " << fd << endl;
             perror("a");
 	    }
-        size -= max_size;
-        start_offset += max_size;
-        array_offset += max_size / sizeof(float);
+        array_offset += new_size / sizeof(float); 
     }
-    
-    ret = pread(fd, Array + array_offset, size, start_offset);
-	if (ret != size)
-	{
-		cout << "pread error" << endl;
-        cout << "size: " << size << endl;
-        //cout << "offset: " << offset << endl;
-        cout << "ret: " << ret << endl;
-        cout << "fd: " << fd << endl;
-        perror("a");
-	}
 
 	close(fd);
     cout << "1st vec" << endl;
@@ -361,7 +373,7 @@ unsigned int *create_emb_l(const char *File_Name, unsigned int size, unsigned in
 }*/
 
 
-unsigned int *create_emb_l(const char *File_Name, unsigned int size, unsigned int start_offset, int num_sparse_features)
+unsigned int *create_emb_l(const char *File_Name, unsigned int size, unsigned int start_offset, int num_sparse_features, unsigned int DataIn_1_size)
 {
     unsigned int *Array;
 	void *ptr = nullptr;
@@ -369,7 +381,7 @@ unsigned int *create_emb_l(const char *File_Name, unsigned int size, unsigned in
     int max_size = 2147479552;
     unsigned int array_offset = 0;
 	
-	if (posix_memalign(&ptr,4096, size)) {
+	if (posix_memalign(&ptr,4096, size + sizeof(unsigned int))) {
 		cout << endl << "HOST-Error: Out of Memory during memory allocation for Array" << endl << endl;
     	exit(1);
   	}
@@ -407,11 +419,18 @@ unsigned int *create_emb_l(const char *File_Name, unsigned int size, unsigned in
 	close(fd);
     
     for (int i = 0; i < num_sparse_features; i++)
-        Array[i] = (Array[i] - 108) / 4;    
+        Array[i] = (Array[i] - 108) / sizeof(unsigned int);    
+    Array[num_sparse_features] = DataIn_1_size / sizeof(unsigned int);
     
     cout << "1st element in Array: " << Array[0] << endl;
 
 	return Array;
+}
+
+unsigned int *split_emb_l(unsigned int *emb_l, int num_devs, int *start_index)
+{
+     
+    //DATAIN_1_SIZE
 }
 
 

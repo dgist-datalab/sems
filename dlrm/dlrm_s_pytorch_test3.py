@@ -299,7 +299,48 @@ class DLRM_Net(nn.Module):
             # create operators
             if ndevices <= 1:
                 self.emb_l = self.create_emb(m_spa, ln_emb)
-                self.emb_l_sj = self.create_emb_sj(m_spa, ln_emb)
+                # create a list of paired lists of the number of embeddings in an embedding table and the table number
+                emb_lengths = []
+                total_emb_size = 0
+                for i in range(ln_emb.size):
+                    emb_pair = []
+                    emb = self.state_dict()["emb_l." + str(i) + ".weight"]
+                    emb_pair.append(len(emb) * args.arch_sparse_feature_size)
+                    emb_pair.append(i)
+                    emb_lengths.append(emb_pair)
+                    total_emb_size += len(emb) * args.arch_sparse_feature_size
+                list.sort(emb_lengths, reverse = True)
+                
+                # table_lists: the list of embedding tables for each device
+                # table_sizes: sizes of the embedding layer in each device
+                # table_nums: the number of tables in each device
+                table_lists = [[] for x in range(args.num_devs)]
+                table_sizes = [0 for x in range(args.num_devs)]
+                true_table_sizes = [0 for x in range(args.num_devs)]
+                table_nums = [0 for x in range(args.num_devs)]
+                new_emb_l = [[0] for x in range(args.num_devs)]
+                
+                for i in range(len(emb_lengths)):
+                    min_idx = table_sizes.index(min(table_sizes))
+                    while table_nums[min_idx] >= ln_emb.size / args.num_devs:
+                        table_sizes[min_idx] = total_emb_size
+                        min_idx = table_sizes.index(min(table_sizes))
+                    table_sizes[min_idx] += emb_lengths[i][0]
+                    true_table_sizes[min_idx] += emb_lengths[i][0]
+                    new_emb_l[min_idx].append(new_emb_l[min_idx][-1] + emb_lengths[i][0])
+                    table_lists[min_idx].append(emb_lengths[i][1])
+                    table_nums[min_idx] += 1
+                self.emb_l_sj = []
+                self.table_lists = []
+                for i in range(len(new_emb_l)):
+                    self.emb_l_sj += new_emb_l[i][:-1]
+                    self.table_lists += table_lists[i]
+                
+                self.emb_l_sj = np.array(self.emb_l_sj)
+                self.table_lists = np.array(self.table_lists)
+                self.table_sizes = np.array(true_table_sizes)
+
+                self.table_nums = table_nums
 
             self.bot_l = self.create_mlp(ln_bot, sigmoid_bot)
             self.top_l = self.create_mlp(ln_top, sigmoid_top)
@@ -356,17 +397,9 @@ class DLRM_Net(nn.Module):
     def apply_emb_interact_feat(self, lS_o, lS_i, emb_l, x):
         # apply_emb
         ly = []
-        #print("lS_o:", lS_o, flush = True)
-        #print("lS_o shape:", lS_o.shape, flush = True)
-        #print("lS_i:", lS_i)
-        #print("lS_i shape:", lS_i.shape, flush = True)
         
         lS_o_shape = lS_o.shape
         lS_i_shape = lS_i.shape
-
-        #if lS_o_shape[1] != args.mini_batch_size:
-         #   y = torch.tensor([[lS_i_shape[1]] * (args.mini_batch_size - lS_o_shape[1]) for i in range(lS_o_shape[0])])
-          #  lS_o = torch.cat((lS_o, y), 1)
 
         flat_lS_o = torch.flatten(lS_o)
         flat_lS_i = torch.flatten(lS_i)
@@ -487,18 +520,27 @@ class DLRM_Net(nn.Module):
             t1 = time.time() - t1
             bottom_mlp += t1
 
+            """
             if args.print_vector:
-                z1 = self.apply_emb_interact_feat(lS_o, lS_i, self.emb_l, x)
+                #z1 = self.apply_emb_interact_feat(lS_o, lS_i, self.emb_l, x)
                 ly = self.apply_emb(lS_o, lS_i, self.emb_l)
                 z2 = self.interact_features(x, ly)
-                print("z1:", z1, flush = True)
+                #print("z1:", z1, flush = True)
                 print("z2:", z2, flush = True)
-
+            """
             if "alveo" in args.test_type:
                 t2 = time.time()
                 z = self.apply_emb_interact_feat(lS_o, lS_i, self.emb_l, x)
                 t2 = time.time() - t2
                 apply_emb_interact_feat += t2
+                # below is just for testing and should be eased later
+                #ly = self.apply_emb(lS_o, lS_i, self.emb_l)
+                #z = self.interact_features(x, ly)
+                if args.print_vector:
+                    ly = self.apply_emb(lS_o, lS_i, self.emb_l)
+                    z2 = self.interact_features(x, ly)
+                    print("z1:", z, flush = True)
+                    print("z2:", z2, flush = True)
             else:
                 # debug prints
                 # print(x.detach().cpu().numpy())
@@ -537,6 +579,7 @@ class DLRM_Net(nn.Module):
             z = torch.clamp(p, min=self.loss_threshold, max=(1.0 - self.loss_threshold))
         else:
             z = p
+        #print("before sequential ends", flush = True)
 
         return z
 
@@ -689,6 +732,7 @@ if __name__ == "__main__":
     parser.add_argument("--print-vector", action="store_true", default=False)
     parser.add_argument("--run-range", type=str, default="all")
     parser.add_argument("--target", type=str, default="sw_emu")
+    parser.add_argument("--num-devs", type=int, default=1)
     
     # model related parameters
     parser.add_argument("--arch-sparse-feature-size", type=int, default=2)
@@ -1156,7 +1200,7 @@ if __name__ == "__main__":
         )
         
     print("time/loss/accuracy (if enabled):")
-    
+
     if "direct" in args.test_type:
         embedding.set_direct_io(args.load_embedding, True)
     elif "ramdisk_cpp" in args.test_type:
@@ -1168,7 +1212,7 @@ if __name__ == "__main__":
         len_lS_i = torch.numel(lS_i)
         xclbinTargetFilename = "/home/user1/Documents/alveo/vitis_lab/training/pybind_commandline_flow/lab/build/" + args.target + "/kernels." + args.target + ".xclbin"
         
-        pybind_host2.alveo_init(xclbinTargetFilename, args.arch_sparse_feature_size, args.mini_batch_size, ln_emb.size, len_lS_o, len_lS_i)
+        pybind_host2.alveo_init(xclbinTargetFilename, args.arch_sparse_feature_size, args.mini_batch_size, ln_emb.size, len_lS_o, len_lS_i, dlrm.emb_l_sj, dlrm.table_nums, dlrm.table_lists, dlrm.table_sizes)
     else:
         f = open(args.load_embedding, 'rb')
      
@@ -1194,15 +1238,21 @@ if __name__ == "__main__":
                 run_range = [train_ld_len - 2, train_ld_len]
             elif args.run_range == "head":
                 run_range = [0, 10]
-
+            
+            #for j, (X, lS_o, lS_i, T) in enumerate(train_ld):
             #for j in range(train_ld_len):
+            #for j in range(10, 15):
             for j in range(run_range[0], run_range[1]):
+                #print("beginning of iteration", flush = True)
             #for j in range(train_ld_len - 2, train_ld_len):
                 X = torch.load('saved_sum/X' + str(j) + '.pt', map_location=torch.device('cpu'))
+                #print("111111", flush = True)
                 lS_o = torch.load('saved_sum/lS_o' + str(j) + '.pt', map_location=torch.device('cpu'))
+                #print("22222", flush = True)
                 lS_i = torch.load('saved_sum/lS_i' + str(j) + '.pt', map_location=torch.device('cpu'))
-                T = torch.load('saved_sum/T' + str(j) + '.pt', map_location=torch.device('cpu'))      
-            #for j, (X, lS_o, lS_i, T) in enumerate(train_ld):
+                #print("33333", flush = True)
+                T = torch.load('saved_sum/T' + str(j) + '.pt', map_location=torch.device('cpu'))    
+                #print("aaaaa", flush = True)
                 if j == 0 and args.save_onnx:
                     (X_onnx, lS_o_onnx, lS_i_onnx) = (X, lS_o, lS_i)
 
@@ -1218,7 +1268,7 @@ if __name__ == "__main__":
                     previous_iteration_time = current_time
                 else:
                     t1 = time_wrap(use_gpu)
-
+                #print("bbbbb", flush = True)
                 # early exit if nbatches was set by the user and has been exceeded
                 if nbatches > 0 and j >= nbatches:
                     break
@@ -1231,12 +1281,13 @@ if __name__ == "__main__":
                 print([S_i.detach().cpu().numpy().tolist() for S_i in lS_i])
                 print(T.detach().cpu().numpy())
                 '''
-              
+                #print("before forward", flush = True)
                 # forward pass                    
                 Z = dlrm_wrap(X, lS_o, lS_i, use_gpu, device)
-
+                #print("before loss", flush = True)
                 # loss
                 E = loss_fn_wrap(Z, T, use_gpu, device)
+                #print("after loss", flush = True)
                 '''
                 # debug prints
                 print("output and loss")
@@ -1284,6 +1335,7 @@ if __name__ == "__main__":
 
                 # print time, loss and accuracy
                 if should_print or should_test:
+                    print("do you need to print?", flush = True)
                     gT = 1000.0 * total_time / total_iter if args.print_time else -1
                     total_time = 0
 
@@ -1441,6 +1493,7 @@ if __name__ == "__main__":
                             The element with index 0 is the number of embedding tables.
                             The element with index i for i > 0 is the starting byte of the embedding table in emb_file.
                             """
+                            
                             for i in range(ln_emb.size):
                                 emb = dlrm.state_dict()["emb_l." + str(i) + ".weight"]
                                 flat_emb = torch.flatten(emb)
@@ -1452,8 +1505,9 @@ if __name__ == "__main__":
                                 emb_bytes += struct.pack('%sf' % len(list_emb), *list_emb)
 
                             # q for long long of type int
-                            emb_file = struct.pack('%sI' % len(header), *header)
-                            emb_file += emb_bytes
+                            #emb_file = struct.pack('%sI' % len(header), *header)
+                            emb_file = emb_bytes
+                            #emb_file += emb_bytes
    
                             with open("models/embedding_" + args.arch_interaction_op + ".txt", 'wb') as f:
                                 f.write(emb_file)
@@ -1529,7 +1583,9 @@ if __name__ == "__main__":
                 with open('pickles/interact_feat' + args.test_type + '.pickle', 'wb') as f:
                     pickle.dump(interact_feat, f, pickle.HIGHEST_PROTOCOL)
             if "alveo" in args.test_type:
+                #print("before alveo exit", flush = True)
                 pybind_host2.alveo_exit()
+                #print("after alveo exit", flush = True)
             elif "direct" in args.test_type or "ramdisk" in args.test_type:
                 embedding.file_close();
             else:

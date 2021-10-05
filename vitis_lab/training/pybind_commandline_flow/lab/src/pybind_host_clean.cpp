@@ -56,11 +56,9 @@ using namespace std;
 
 //#include <CL/cl.hpp>
 
-#define ALL_MESSAGES
+//#define ALL_MESSAGES
 #define NUM_CUS 2
-#define NUM_DEVS 2
-
-const unsigned int DATAIN_1_SIZE = 2160804928;
+#define NUM_DEVS 2 
 
 int g_arch_sparse_feature_size;
 int g_num_sparse_features;
@@ -70,12 +68,16 @@ int g_sparse_offset_group_batch_size[NUM_DEVS];
 int g_sparse_index_group_batch_size[NUM_DEVS];
 
 float *RES[NUM_CUS * NUM_DEVS];
-float *DataIn_1;
+float *DataIn_1[NUM_DEVS];
 
 unsigned int *emb_l;
+unsigned int *emb_ls[NUM_DEVS];
+unsigned int *table_lists;
+unsigned int *table_nums_;
+unsigned int table_nums[NUM_DEVS];
 
-int *lS_o;
-int *lS_i;
+int *lS_o[NUM_DEVS];
+int *lS_i[NUM_DEVS];
 
 cl_mem	GlobMem_BUF_emb_l[NUM_DEVS],
         GlobMem_BUF_lS_o[NUM_DEVS],
@@ -96,6 +98,9 @@ struct thread_data
     int sparse_offset_group_batch_size;
     int sparse_index_group_batch_size;
     int ui;
+    int *ptr_buf_o;
+    int *ptr_buf_i;
+    int start_offset;
 };
 
 // ********************************************************************************** //
@@ -104,7 +109,7 @@ struct thread_data
 // ---------------------------------------------------------------------------------- //
 // ********************************************************************************** //
 
-int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int batch_size, int num_sparse_features, int len_lS_o, int len_lS_i)
+int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int batch_size, int num_sparse_features, int len_lS_o, int len_lS_i, py::array_t<unsigned int> np_emb_l, py::array_t<unsigned int> np_table_nums, py::array_t<unsigned int> np_table_lists, py::array_t<unsigned int> np_table_sizes)
 {
 	g_arch_sparse_feature_size = arch_sparse_feature_size;
 	g_num_sparse_features = num_sparse_features;	
@@ -290,7 +295,8 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	for (ui = 0; ui < NUM_DEVS; ui++)
         Device_Detected[ui] = false;
     
-	for (ui = 0; ui < Nb_Of_Devices; ui++) {
+	for (ui = 0; ui < NUM_DEVS; ui++) {
+    //for (ui = 0; ui < Nb_Of_Devices; ui++) {
 		errCode = clGetDeviceInfo(Device_IDs[ui], CL_DEVICE_NAME, 0, NULL, &size);
 		if (errCode != CL_SUCCESS) {
 			cout << endl << "HOST-Error: Failed to get the size of the Device parameter value " << "CL_DEVICE_NAME" << endl << endl;
@@ -314,6 +320,7 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 		if (strcmp(device_info, Target_Device_Name) == 0) {
 			Device_Detected[ui]        = true;
 			Target_Device_ID[ui]      = Device_IDs[ui];
+            //cout << "device matched: " << ui << endl;
 		}
 
         delete[] device_info;
@@ -402,7 +409,7 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
     for (ui = 0; ui < NUM_DEVS; ui++)
     {    
 	    if (Device_Detected[ui] == false) {
-		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
 		    continue;
             //return EXIT_FAILURE;
 	    } 
@@ -459,26 +466,23 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	// ------------------------------------------------------------------
 
 	//cout << "HOST-Info: Reading Input data from the " << DataIn_1_FileName << " file ... ";
-
+    
     void *ptr[NUM_DEVS * NUM_CUS];
 
-    emb_l = create_emb_l(DataIn_1_FileName, g_num_sparse_features * sizeof(unsigned int), 4, num_sparse_features);
-    DataIn_1 = read_emb_file(DataIn_1_FileName, DATAIN_1_SIZE, 108);
+    py::buffer_info buf_emb_l = np_emb_l.request();
+	unsigned int *ptr_buf_emb_l = reinterpret_cast<unsigned int *>(buf_emb_l.ptr);
+    py::buffer_info buf_table_nums = np_table_nums.request();
+    table_nums_ = reinterpret_cast<unsigned int *>(buf_table_nums.ptr);
+    py::buffer_info buf_table_lists = np_table_lists.request();
+    table_lists = reinterpret_cast<unsigned int *>(buf_table_lists.ptr);
+    py::buffer_info buf_table_sizes = np_table_sizes.request();
+    unsigned int *table_sizes = reinterpret_cast<unsigned int *>(buf_table_sizes.ptr);
+
+    emb_l = create_emb_l(DataIn_1_FileName, g_num_sparse_features * sizeof(unsigned int), 4, num_sparse_features, DATAIN_1_SIZE);
+
+    memcpy(table_nums, table_nums_, sizeof(unsigned int) * NUM_DEVS);
 
     Nb_Of_Elements = batch_size * g_arch_sparse_feature_size / NUM_CUS;
-
-    void *ptr_o = nullptr;
-    void *ptr_i = nullptr;
-    if (posix_memalign(&ptr_o, 4096, len_lS_o * sizeof(int)))
-    {
-        cout << endl << "HOST-Error: Out of Memory during memory allocation for lS_o array" << endl << endl;
-    }
-    if (posix_memalign(&ptr_i, 4096, len_lS_i * sizeof(int)))
-    {
-        cout << endl << "HOST-Error: Out of Memory during memory allocation for lS_i array" << endl << endl;
-    }
-    lS_o = reinterpret_cast<int *>(ptr_o);
-    lS_i = reinterpret_cast<int *>(ptr_i);
 
 	// ------------------------------------------------------------------
 	// Step 4.2: Create Buffers in Global Memory to store data
@@ -492,14 +496,43 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 	cout << "HOST-Info: Allocating buffers in Global Memory to store Input and Output Data ..." << endl;
 	#endif
 
+    unsigned int j = 0;
+    
 	for (ui = 0; ui < NUM_DEVS; ui++)
     {    
 	    if (Device_Detected[ui] == false) {
-		    //cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
+		    cout << endl << "HOST-Error: Failed to get detect " << Target_Device_Name << " device" << endl << endl;
 		    continue;
             //return EXIT_FAILURE;
 	    } 
         
+        DataIn_1[ui] = read_emb_file(DataIn_1_FileName, table_sizes[ui] * sizeof(float), 108, table_lists, emb_l, j, j + table_nums[ui]);
+
+        void *ptr_emb_l = nullptr;
+        if (posix_memalign(&ptr_emb_l, 4096, table_nums[ui] * sizeof(unsigned int)))
+        {
+            cout << endl << "HOST-Error: Out of Memory during memory allocation for emb_l array" << endl << endl;
+        }
+
+        emb_ls[ui] = reinterpret_cast<unsigned int *>(ptr_emb_l);
+
+        memcpy(emb_ls[ui], ptr_buf_emb_l + j, table_nums[ui] * sizeof(unsigned int));
+        
+        j += table_nums[ui];        
+        
+        void *ptr_o = nullptr;
+        void *ptr_i = nullptr;
+        if (posix_memalign(&ptr_o, 4096, len_lS_o * sizeof(int)))
+        {
+            cout << endl << "HOST-Error: Out of Memory during memory allocation for lS_o array" << endl << endl;
+        }
+        if (posix_memalign(&ptr_i, 4096, len_lS_i * sizeof(int)))
+        {
+            cout << endl << "HOST-Error: Out of Memory during memory allocation for lS_i array" << endl << endl;
+        }
+        lS_o[ui] = reinterpret_cast<int *>(ptr_o);
+        lS_i[ui] = reinterpret_cast<int *>(ptr_i);
+
         ptr[ui * NUM_DEVS + 0] = nullptr;
 	    if (posix_memalign(&ptr[ui * NUM_DEVS + 0],4096, Nb_Of_Elements * NUM_CUS * sizeof(float))) {
 		    cout << endl << "HOST-Error: Out of Memory during memory allocation for RES array" << endl << endl;
@@ -532,8 +565,8 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
     
         // Allocate Global Memory for GlobMem_BUF_DataIn_1
 	    // .......................................................
-    
-        GlobMem_BUF_DataIn_1[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, DATAIN_1_SIZE, DataIn_1, &errCode);
+        
+        GlobMem_BUF_DataIn_1[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, table_sizes[ui] * sizeof(float), DataIn_1[ui], &errCode);
 	    if (errCode != CL_SUCCESS) {
 		    cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_DataIn_1" << endl << endl;
 		    return EXIT_FAILURE;
@@ -541,7 +574,7 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 
 	    // Allocate Global Memory for GlobMem_BUF_ptr_emb_l
 	    // .......................................................
-	    GlobMem_BUF_emb_l[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, g_num_sparse_features * sizeof(unsigned int), emb_l, &errCode);
+	    GlobMem_BUF_emb_l[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, g_num_sparse_features * sizeof(unsigned int), emb_ls[ui], &errCode);
 	    if (errCode != CL_SUCCESS)
 	    {
 		    cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_emb_l" << endl << endl;
@@ -558,14 +591,14 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
             }
 	    }
 
-        GlobMem_BUF_lS_o[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_o * sizeof(int), lS_o, &errCode);
+        GlobMem_BUF_lS_o[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_o * sizeof(int), lS_o[ui], &errCode);
         if (errCode != CL_SUCCESS)
         {
             cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_lS_o" << endl << endl;
             return EXIT_FAILURE;
         }
 
-        GlobMem_BUF_lS_i[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_i * sizeof(int), lS_i, &errCode);
+        GlobMem_BUF_lS_i[ui] = clCreateBuffer(Context[ui], CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, len_lS_i * sizeof(int), lS_i[ui], &errCode);
         if (errCode != CL_SUCCESS)
         {
             cout << endl << "Host-Error: Failed to allocate Global Memory for GlobMem_BUF_lS_i" << endl << endl;
@@ -586,7 +619,8 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
             errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 2, sizeof(cl_mem), &GlobMem_BUF_emb_l[ui]);
    	        errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 3, sizeof(cl_mem), &GlobMem_BUF_lS_o[ui]);
 	        errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 4, sizeof(cl_mem), &GlobMem_BUF_lS_i[ui]);
-	        //errCode |= clSetKernelArg(Kernel[i], 5, sizeof(int), &g_num_sparse_features);
+	        errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 5, sizeof(unsigned int), &table_nums[ui]);
+            //errCode |= clSetKernelArg(Kernel[i], 5, sizeof(int), &g_num_sparse_features);
             //errCode |= clSetKernelArg(Kernel[i], 6, sizeof(int), &g_arch_sparse_feature_size);
             //errCode |= clSetKernelArg(Kernel, 9, sizeof(int), &g_batch_size1);
         }
@@ -648,7 +682,6 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
         ::clFinish(Command_Queue[ui]);
     }
 
-
     delete[] Platform_IDs;
 	delete[] Device_IDs;
 
@@ -657,36 +690,41 @@ int alveo_init(const char *xclbinFilename, int arch_sparse_feature_size, int bat
 
 void alveo_exit()
 {
-	int i;
+    int i;
     cl_uint ui;
-    
+    cl_int ret = CL_SUCCESS;
     for (ui = 0; ui < NUM_DEVS; ui++)
     {
-        clReleaseDevice(Target_Device_ID[ui]);
-
-        clReleaseMemObject(GlobMem_BUF_DataIn_1[ui]);
-	    clReleaseMemObject(GlobMem_BUF_emb_l[ui]);
-        clReleaseMemObject(GlobMem_BUF_lS_o[ui]);
-        clReleaseMemObject(GlobMem_BUF_lS_i[ui]);
+        ret |= clReleaseDevice(Target_Device_ID[ui]);
+        if (ret != CL_SUCCESS)
+            cout << "clReleaseDevice failed" << endl;
+        ret |= clReleaseMemObject(GlobMem_BUF_DataIn_1[ui]);
+	    ret |= clReleaseMemObject(GlobMem_BUF_emb_l[ui]);
+        ret |= clReleaseMemObject(GlobMem_BUF_lS_o[ui]);
+        ret |= clReleaseMemObject(GlobMem_BUF_lS_i[ui]);
+        for (i = 0; i < NUM_CUS; i++)
+            ret |= clReleaseMemObject(GlobMem_BUF_RES[ui * NUM_DEVS + i]);
+        if (ret != CL_SUCCESS)
+            cout << "clReleaseMemObject failed" << endl;
+        for (i = 0; i < NUM_CUS; i++)
+            ret |= clReleaseKernel(Kernel[ui * NUM_DEVS + i]);
+        if (ret != CL_SUCCESS)
+            cout << "clReleaseKernel failed" << endl;
+        ret |= clReleaseProgram(Program[ui]);
+        if (ret != CL_SUCCESS)
+            cout << "clReleaseProgram failed" << endl;
+        clReleaseCommandQueue(Command_Queue[ui]);
+        clReleaseContext(Context[ui]);
 
         for (i = 0; i < NUM_CUS; i++)
-            clReleaseMemObject(GlobMem_BUF_RES[ui * NUM_DEVS + i]);
-
-        for (i = 0; i < NUM_CUS; i++)
-            clReleaseKernel(Kernel[ui * NUM_DEVS + i]);
-
-	    clReleaseProgram(Program[ui]);
-	    clReleaseCommandQueue(Command_Queue[ui]);
-	    clReleaseContext(Context[ui]);
-
-	    for (i = 0; i < NUM_CUS; i++)
             free(RES[ui * NUM_DEVS + i]);
+        free(DataIn_1[ui]);
+        free(emb_ls[ui]);
+        free(lS_o[ui]);
+        free(lS_i[ui]);
     }
 
-    free(DataIn_1);
     free(emb_l);
-    free(lS_o);
-    free(lS_i);
 }
 
 void *compute(void *thread_arg)
@@ -706,7 +744,13 @@ void *compute(void *thread_arg)
     errCode = CL_SUCCESS;
     sparse_offset_group_batch_size = my_data->sparse_offset_group_batch_size;
     sparse_index_group_batch_size = my_data->sparse_index_group_batch_size;
-    ui = my_data->ui; 
+    ui = my_data->ui;
+
+    for (i = 0; i < (int)table_nums[ui]; i++)
+    {
+        memcpy(lS_o[ui] + i * sparse_offset_group_batch_size, my_data->ptr_buf_o + table_lists[my_data->start_offset + i] * sparse_offset_group_batch_size, sparse_offset_group_batch_size * sizeof(int));
+        memcpy(lS_i[ui] + i * sparse_index_group_batch_size, my_data->ptr_buf_i + table_lists[my_data->start_offset + i] * sparse_index_group_batch_size, sparse_index_group_batch_size * sizeof(int));
+    }
     
     for (i = 0; i < NUM_CUS - 1; i++)
         sparse_offset_group_batch_sizes[i] = sparse_offset_group_batch_size / NUM_CUS;
@@ -726,14 +770,14 @@ void *compute(void *thread_arg)
     {
         g_sparse_offset_group_batch_size[ui] = sparse_offset_group_batch_size;
         for (i = 0; i < NUM_CUS; i++)
-            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 5, sizeof(int), &sparse_offset_group_batch_size);
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 6, sizeof(int), &sparse_offset_group_batch_size);
     }
 
     if (g_sparse_index_group_batch_size[ui] != sparse_index_group_batch_size)
     {
         g_sparse_index_group_batch_size[ui] = sparse_index_group_batch_size;
         for (i = 0; i < NUM_CUS; i++)
-            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 6, sizeof(int), &sparse_index_group_batch_size);
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 7, sizeof(int), &sparse_index_group_batch_size);
     }
 
     for (i = 0; i < NUM_CUS; i++)
@@ -741,12 +785,12 @@ void *compute(void *thread_arg)
         if (g_i_begin[ui * NUM_DEVS + i] != i_begin[i])
         {
             g_i_begin[ui * NUM_DEVS + i] = i_begin[i];
-            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 7, sizeof(int), &i_begin[i]);
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 8, sizeof(int), &i_begin[i]);
         }
         if (g_i_end[ui * NUM_DEVS + i] != i_end[i])
         {
             g_i_end[ui * NUM_DEVS + i] = i_end[i];
-            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 8, sizeof(int), &i_end[i]);
+            errCode |= clSetKernelArg(Kernel[ui * NUM_DEVS + i], 9, sizeof(int), &i_end[i]);
         }
     }
 
@@ -799,7 +843,7 @@ void *compute(void *thread_arg)
     //size_t localSize[1];
     //globalSize[0] = 1;
     //localSize[0]  = 1;
-    
+     
     for (i = 0; i < NUM_CUS; i++)
         errCode |= clEnqueueTask(Command_Queue[ui], Kernel[ui * NUM_DEVS + i], 0, NULL, &K_exe_event[i]);
 
@@ -807,7 +851,7 @@ void *compute(void *thread_arg)
 	    cout << endl << "HOST-Error: Failed to execute Kernel" << endl << endl;
 	    //return EXIT_FAILURE;
     }
-
+    
     for (i = 0; i < NUM_CUS; i++)
         errCode |= clEnqueueMigrateMemObjects(Command_Queue[ui], 1, &GlobMem_BUF_RES[ui * NUM_DEVS + i], CL_MIGRATE_MEM_OBJECT_HOST, 1, &K_exe_event[i], NULL);
 
@@ -832,11 +876,6 @@ void *compute(void *thread_arg)
     // ------------------------------------------------------
     // Step 6.1: Read output Result to Host memory (RES)
     // ------------------------------------------------------
-
-    //::clFlush(Command_Queue[ui]);
-    //::clFinish(Command_Queue[ui]); // flush everything in the Command_Queue
-
-    //cout << endl << "HOST-Info: DONE" << endl << endl;
     
     ::clFinish(Command_Queue[ui]);
 
@@ -853,40 +892,16 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
     int thread_id;
     struct thread_data td[NUM_DEVS];
     int i;
+    int start_offset;
     int status;
-    cl_int	errCode = CL_SUCCESS;
     cl_uint ui;
     py::buffer_info buf_o = np_lS_o.request();
 	py::buffer_info buf_i = np_lS_i.request();
 	int *ptr_buf_o = reinterpret_cast<int *>(buf_o.ptr);
 	int *ptr_buf_i = reinterpret_cast<int *>(buf_i.ptr);
-    int lS_o_length = g_num_sparse_features * sparse_offset_group_batch_size;
-	int lS_i_length = g_num_sparse_features * sparse_index_group_batch_size;
-    //int sparse_offset_group_batch_sizes[NUM_CUS * NUM_DEVS];
-    //cl_event K_exe_event[NUM_CUS * NUM_DEVS];
-    //int i_begin[NUM_CUS * NUM_DEVS];
-    //int i_end[NUM_CUS * NUM_DEVS];
-
-    memcpy(lS_o, ptr_buf_o, lS_o_length * sizeof(int));
-    memcpy(lS_i, ptr_buf_i, lS_i_length * sizeof(int));
     
-    //int sparse_offset_group_batch_size1 = sparse_offset_group_batch_size / 2;
-    /*
-    if (sparse_offset_group_batch_size > BATCH_SIZE / 2)
-    {
-        g_batch_size2 = sparse_offset_group_batch_size - BATCH_SIZE / 2;
-        errCode = clSetKernelArg(Kernel2, 9, sizeof(int), &g_batch_size2);
-        if (errCode != CL_SUCCESS)
-            cout << endl << "Host-ERROR: Failed to set Kernel argument 9" << endl;
-    }
-    else if (sparse_offset_group_batch_size < BATCH_SIZE / 2)
-    {
-        g_batch_size1 = sparse_offset_group_batch_size;
-        errCode = clSetKernelArg(Kernel, 9, sizeof(int), &g_batch_size1);
-        if (errCode != CL_SUCCESS)
-            cout << endl << "Host-ERROR: Failed to set Kernel argument 9" << endl;
-    }*/
-  
+    start_offset = 0;
+    
     for (i = 0; i < NUM_DEVS; i++)
     {
         if (Device_Detected[i] == false) {
@@ -897,9 +912,13 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
         td[i].sparse_offset_group_batch_size = sparse_offset_group_batch_size;
         td[i].sparse_index_group_batch_size = sparse_index_group_batch_size;
         td[i].ui = i;
+        td[i].ptr_buf_o = ptr_buf_o;
+        td[i].ptr_buf_i = ptr_buf_i;
+        td[i].start_offset = start_offset;
         thread_id = pthread_create(&threads[i], NULL, compute, (void *)&td[i]);
         if (thread_id < 0)
             perror("thread create error: ");
+        start_offset += table_nums[i];
     }
 
     for (i = 0; i < NUM_DEVS; i++)
@@ -908,8 +927,7 @@ py::array_t<float> add(py::array_t<int> np_lS_o, py::array_t<int> np_lS_i, int s
     #if NUM_DEVS == 2
     for (i = 0; i < sparse_offset_group_batch_size * g_arch_sparse_feature_size; i++)
     {
-        RES[0][i] += RES[NUM_DEVS][i];
-        RES[0][i] /= 2;
+        RES[0 * NUM_DEVS][i] += RES[1 * NUM_DEVS][i];
     }
     #endif
 

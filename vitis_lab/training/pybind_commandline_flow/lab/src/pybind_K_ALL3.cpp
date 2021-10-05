@@ -367,6 +367,138 @@ void K_VADD(const float *in1,
 		  const unsigned int *emb_l,
 		  const int *lS_o,
 		  const int *lS_i,
+          const int num_sparse_features,
+		  //const int arch_sparse_feature_size,
+		  const int sparse_offset_group_batch_size,
+		  const int sparse_index_group_batch_size,
+          const int i_begin,
+          const int i_end
+) 
+    {
+#pragma HLS INTERFACE m_axi port=in1 offset=slave bundle=gmem0
+#pragma HLS INTERFACE m_axi port=out_r offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi port=emb_l offset=slave bundle=gmem2
+#pragma HLS INTERFACE m_axi port=lS_o offset=slave bundle=gmem3
+#pragma HLS INTERFACE m_axi port=lS_i offset=slave bundle=gmem4
+#pragma HLS INTERFACE s_axilite port=in1 bundle=control
+#pragma HLS INTERFACE s_axilite port=out_r bundle=control
+#pragma HLS INTERFACE s_axilite port=emb_l bundle=control
+#pragma HLS INTERFACE s_axilite port=lS_o bundle=control
+#pragma HLS INTERFACE s_axilite port=lS_i bundle=control
+#pragma HLS INTERFACE s_axilite port=num_sparse_features bundle=control
+//#pragma HLS INTERFACE s_axilite port=arch_sparse_feature_size bundle=control
+#pragma HLS INTERFACE s_axilite port=sparse_offset_group_batch_size bundle=control
+#pragma HLS INTERFACE s_axilite port=sparse_index_group_batch_size bundle=control
+#pragma HLS INTERFACE s_axilite port=i_begin bundle=control
+#pragma HLS INTERFACE s_axilite port=i_end bundle=control
+#pragma HLS INTERFACE s_axilite port=return bundle = control
+
+        int *sparse_index_group_batch;
+		int *sparse_offset_group_batch;
+        int *sparse_index_group_batch_l;
+		unsigned int offset;
+		int begin, end;
+		int i, j, k, l;
+		int vector_num;
+		int out_r_size;
+        unsigned int table_addr;
+        int out_vec_addr;
+        int batch_size = i_end - i_begin;
+        int j_begin, j_end;
+        out_r_size = batch_size * ARCH_SPARSE_FEATURE_SIZE;
+        unsigned int emb_l_l[NUM_SPARSE_FEATURES];
+        float out_r_l[OUT_R_SIZE];
+        int lS_o_l[LS_SIZE];
+        int lS_i_l[LS_SIZE];
+        float v_cache[CACHE_SIZE];
+        float tmp[ARCH_SPARSE_FEATURE_SIZE];
+        
+        memcpy(emb_l_l, emb_l, num_sparse_features * sizeof(unsigned int));
+
+        LS_O_TABLE_LOOP: for (k = 0; k < num_sparse_features; k++)
+        {
+            sparse_offset_group_batch = (int *)lS_o + k * sparse_offset_group_batch_size;
+            LS_O_LOOP: for (i = 0; i < batch_size; i++)
+            {
+                #pragma HLS PIPELINE
+                lS_o_l[k * (batch_size + 1) + i] = sparse_offset_group_batch[i_begin + i] - i_begin;
+            }
+                       
+            if (i_begin == 0)
+                lS_o_l[k * (batch_size + 1) + i] = sparse_offset_group_batch[i];
+            else
+                lS_o_l[k * (batch_size + 1) + i] = sparse_index_group_batch_size - i_begin;
+        }
+
+        LS_I_TABLE_LOOP: for (k = 0; k < num_sparse_features; k++)
+        {
+            #pragma HLS PIPELINE
+            sparse_index_group_batch = (int *)lS_i + k * sparse_index_group_batch_size;
+            j_begin = lS_o_l[k * (batch_size + 1)];
+            j_end = lS_o_l[(k + 1) * (batch_size + 1) - 1];
+            sparse_index_group_batch_l = (int *)lS_i_l + k * (j_end - j_begin);
+           
+            memcpy(sparse_index_group_batch_l + j_begin, sparse_index_group_batch + i_begin + j_begin, sizeof(int) * j_end - j_begin); 
+        }
+ 
+        // Initialize out_r to 0.0
+        memset(out_r_l, 0, sizeof(float) * out_r_size);
+
+        // Cache embedding vectors
+        TABLE_LOOP: for (k = 0; k < num_sparse_features; k++)
+        {
+            sparse_index_group_batch = lS_i_l + k * (j_end - j_begin);
+            sparse_offset_group_batch = lS_o_l + k * (batch_size + 1);
+            table_addr = emb_l_l[k];
+            
+            //cout << "before batch_loop for k: " << k << endl;
+            // Embedding lookup as much as batch size
+            BATCH_LOOP: for (i = 0; i < batch_size; i++)
+            {
+                out_vec_addr = i * ARCH_SPARSE_FEATURE_SIZE;
+
+                REQUEST_LOOP: for (j = sparse_offset_group_batch[i]; j < sparse_offset_group_batch[i + 1]; j++)
+                {
+                    // emb_lookup_cpp
+                    #pragma HLS PIPELINE
+                    vector_num = sparse_index_group_batch[j];
+                    offset = table_addr + (unsigned int)vector_num * (unsigned int) ARCH_SPARSE_FEATURE_SIZE;
+                    memcpy(v_cache + out_vec_addr, in1 + offset, sizeof(float) * ARCH_SPARSE_FEATURE_SIZE);                   
+                    //memcpy(v_cache + out_vec_addr, in1 + offset, sizeof(float) * ARCH_SPARSE_FEATURE_SIZE);
+                    //memcpy(v_cache + out_vec_addr, in1 + offset, sizeof(float) * ARCH_SPARSE_FEATURE_SIZE);
+                }
+            }
+            //cout << "before batch_loop2 for k: " << k << endl;
+
+            BATCH_LOOP2: for (i = 0; i < batch_size; i++)
+            {
+                out_vec_addr = i * ARCH_SPARSE_FEATURE_SIZE;
+                REQUEST_LOOP2: for (j = sparse_offset_group_batch[i]; j < sparse_offset_group_batch[i + 1]; j++)
+                {
+                    offset = ARCH_SPARSE_FEATURE_SIZE * j;
+                    
+                    memcpy(tmp, out_r_l + out_vec_addr, ARCH_SPARSE_FEATURE_SIZE * sizeof(float));   
+
+                    COPY_LOOP2: for (l = 0; l < ARCH_SPARSE_FEATURE_SIZE; l++)
+                    {
+                        #pragma HLS PIPELINE
+                        out_r_l[out_vec_addr + l] = tmp[l] + v_cache[offset + (unsigned int)l];
+                    }
+                }
+            }
+        }
+                 
+        memcpy(out_r, out_r_l, sizeof(float) * out_r_size);
+    }
+}
+
+/*
+extern "C" {
+void K_VADD(const float *in1,
+		  float *out_r,     // Output Result
+		  const unsigned int *emb_l,
+		  const int *lS_o,
+		  const int *lS_i,
           //const int num_sparse_features,
 		  //const int arch_sparse_feature_size,
 		  const int sparse_offset_group_batch_size,
@@ -489,7 +621,7 @@ void K_VADD(const float *in1,
                  
         memcpy(out_r, out_r_l, sizeof(float) * out_r_size);
     }
-}
+}*/
 
 /*
 extern "C" {
