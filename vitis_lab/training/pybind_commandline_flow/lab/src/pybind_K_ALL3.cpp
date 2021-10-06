@@ -488,7 +488,7 @@ void K_VADD(const float *in1,
             }
         }
                  
-        memcpy(out_r, out_r_l, sizeof(float) * out_r_size);
+        memcpy(out_r + i_begin * ARCH_SPARSE_FEATURE_SIZE, out_r_l, sizeof(float) * out_r_size);
     }
 }
 
